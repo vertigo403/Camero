@@ -175,3 +175,5 @@ storage/
 models/*.onnx
 src/ffmpeg.exe
 src/ffprobe.exe
+
+tools/
