@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Camero — Help</title>
+
+    <link rel="stylesheet" href="/static/styles.css?v=0.3.18" />
+    <style>
+      /* Small, local-only tweaks for readable documentation blocks */
+      .help-wrap { max-width: 980px; margin: 0 auto; }
+      .help-kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; padding: 2px 6px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }
+      .help-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }
+      .help-list { margin: 8px 0 0; padding-left: 18px; color: var(--muted); }
+      .help-list li { margin: 6px 0; }
+      .help-note { border: 1px solid var(--accent-soft-border); background: var(--accent-soft-bg); border-radius: 14px; padding: 12px; }
+      .help-danger { border: 1px solid var(--danger-soft-border); background: var(--danger-soft-bg); border-radius: 14px; padding: 12px; }
+      .help-section-title { font-size: 15px; font-weight: 800; margin: 0 0 8px; }
+      .help-p { color: var(--muted); margin: 8px 0 0; line-height: 1.45; }
+      .help-h2 { font-size: 16px; font-weight: 800; margin: 0 0 6px; }
+      .help-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+      @media (min-width: 900px) {
+        .help-grid { grid-template-columns: 1fr 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand" style="gap:12px">
+        <img class="brand-logo" src="/assets/camero.png" alt="Camero" />
+        <span>Camero</span>
+      </div>
+      <nav class="nav">
+        <a class="nav-item" href="/#recordings" title="Back to Camero">Back</a>
+        <a class="nav-item active" href="/static/help.html" aria-current="page" title="Help" aria-label="Help">
+          <span aria-hidden="true">❔</span>
+        </a>
+        <button id="themeToggle" class="nav-button" type="button" title="Toggle theme" aria-label="Toggle theme">🌙</button>
+      </nav>
+    </header>
+
+    <main class="container help-wrap">
+      <div class="page-title" style="margin-top: 8px">
+        <div>
+          <div class="h1">Camero Help</div>
+          <div class="subtle">How Camero works and how to use it effectively.</div>
+        </div>
+      </div>
+
+      <div class="list">
+        <div class="list-item help-note">
+          <div class="help-section-title">What Camero is</div>
+          <div class="help-p">
+            Camero is a local catalog manager for recorded webcam stream sessions. It scans your video folders, extracts metadata (streamer, site, date/time, codecs, duration, etc.),
+            and lets you browse, tag, preview, and organize recordings from a web-based interface.
+          </div>
+          <div class="help-p">
+            Camero runs on your own computer and opens a browser UI. By default it listens at <span class="help-code">http://127.0.0.1:6969</span>, and you can change the backend IP/host and port in Settings, including binding to an external IP when needed. No cloud services are required.
+          </div>
+        </div>
+
+        <div class="list-item help-note">
+          <div class="help-section-title">Portable app & removable drives</div>
+          <div class="help-p">
+            Camero is designed to be <b>portable</b>: your catalog’s database and generated metadata live <b>inside your catalog folder</b> (under <span class="help-code">.camero/</span>).
+            This means the catalog “travels with” the recordings.
+          </div>
+          <div class="help-p">
+            Camero also works well with <b>removable drives</b>. On Windows, it can keep tracking the active catalog even if the same drive appears with a different letter,
+            thanks to a stable volume identifier.
+          </div>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Key concepts</div>
+          <ul class="help-list">
+            <li><b>Catalog root</b>: the main folder that contains your recordings. Camero stores catalog metadata inside it under <span class="help-code">.camero/</span>.</li>
+            <li><b>Catalog folders</b>: optional additional folders to scan (each can have its own filename pattern). Useful for split libraries or multiple download locations.</li>
+            <li><b>Recordings</b>: individual video files. You can filter, tag, move/copy, remux/transcode, and open them in an external player.</li>
+            <li><b>Streamers</b>: people/channels detected from filenames (or set manually). Streamers can have a site and an avatar.</li>
+            <li><b>Sites</b>: platforms (e.g., the streaming site). Used for filtering and organization.</li>
+            <li><b>Tags</b>: custom labels you assign to recordings for quick filtering and organization.</li>
+          </ul>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">First run checklist (inside the app)</div>
+          <ul class="help-list">
+            <li>Open <b>Settings</b> (⚙) and set your <b>Catalog root</b>.</li>
+            <li>(Optional) Add one or more <b>Catalog folders</b> if you keep recordings in multiple locations.</li>
+            <li>Go to <b>Recordings</b> and click <b>Scan catalog</b> to populate the database.</li>
+            <li>Go to <b>Recordings</b> to browse and start tagging/organizing.</li>
+          </ul>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">How scanning and filename parsing works</div>
+          <div class="help-p">
+            Scanning reads files on disk and extracts metadata. A lot of the initial metadata (Streamer, Site, Date, Time) is parsed from filenames using a regular expression.
+            The default pattern expects something like:
+          </div>
+          <div class="help-p"><span class="help-code">&lt;streamer&gt;_&lt;site&gt;_&lt;YYYYMMDD&gt;_&lt;time&gt;.&lt;ext&gt;</span></div>
+          <div class="help-p">
+            If your naming scheme is different, adjust the filename regex in <b>Settings</b>. Camero accepts named groups such as
+            <span class="help-code">streamer</span>, <span class="help-code">site</span>, <span class="help-code">date</span>, <span class="help-code">time</span>.
+          </div>
+          <div class="help-p">
+            If you need to update already-scanned entries after changing patterns, use <b>Rescan metadata</b> on selected recordings.
+          </div>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Recordings page</div>
+          <div class="help-grid">
+            <div class="help-note">
+              <div class="help-h2">Browsing</div>
+              <ul class="help-list">
+                <li>Sort by date, title, streamer, duration, size, or resolution.</li>
+                <li>Use <b>Filters</b> (funnel icon) for advanced filtering (size, duration, resolution, codecs).</li>
+                <li>Use pagination controls to navigate large libraries.</li>
+              </ul>
+            </div>
+            <div class="help-note">
+              <div class="help-h2">Card actions</div>
+              <ul class="help-list">
+                <li><span class="help-kbd">📁</span> Open containing folder.</li>
+                <li><span class="help-kbd">▶️</span> Open in your default external player.</li>
+                <li><span class="help-kbd">🏷️</span> Assign tags.</li>
+                <li><b>Create preview</b>: generates an animated thumbnail preview for hover playback.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="help-p" style="margin-top:10px">
+            You can also select multiple recordings (checkbox overlay) and use bulk actions like delete, assign tags/sites, move/copy,
+            rescan metadata, or start a transcode.
+          </div>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Recording details (player modal)</div>
+          <ul class="help-list">
+            <li><b>Playback</b> happens inside the browser using an embedded player.</li>
+            <li>Use <span class="help-kbd">←</span>/<span class="help-kbd">→</span> to skip -5s / +5s (when the modal is open).</li>
+            <li><b>Edit metadata</b>: set Streamer, Site, or Date if parsing didn’t detect it correctly.</li>
+            <li><b>Set thumbnails</b>:
+              <ul class="help-list">
+                <li><b>Set current frame as streamer avatar</b></li>
+                <li><b>Set current frame as recording thumbnail</b></li>
+              </ul>
+            </li>
+            <li><b>Tags</b>: add/remove tags directly from the modal.</li>
+          </ul>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Animated previews</div>
+          <div class="help-p">
+            Animated previews are short MP4 clips used for hover playback on recording cards.
+            Camero builds previews from multiple 1-second fragments sampled across the video.
+          </div>
+          <div class="help-p">
+            If your catalog is large, generating previews can be time-consuming. You can create them per-recording, run <b>Generate animated previews</b> from the Recordings toolbar,
+            and optionally enable <b>Generate animated previews after scan</b> in Settings.
+          </div>
+          <div class="help-p">
+            You can configure how many fragments are used (5/10/15/20, default 10) in Settings.
+          </div>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Move & Copy</div>
+          <div class="help-p">
+            Bulk <b>Move</b> and <b>Copy</b> let you send recordings to <b>any folder on this computer</b>. A dialog lets you type a destination path or pick one with a native folder chooser.
+          </div>
+          <ul class="help-list">
+            <li><b>Move</b> to a folder <b>inside</b> the catalog keeps the recording in the catalog (it is re-located).</li>
+            <li><b>Move</b> to a folder <b>outside</b> the catalog removes the recording from the catalog (it is treated as an export).</li>
+            <li><b>Copy</b> copies files to the destination and keeps the originals in the catalog.</li>
+            <li><b>Preserve folder structure</b> recreates the recording's folder structure inside the destination folder.</li>
+          </ul>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Remux vs Transcode</div>
+          <div class="help-grid">
+            <div class="help-note">
+              <div class="help-h2">Remux (Make playable)</div>
+              <div class="help-p">
+                Some containers (like <span class="help-code">.mkv</span>, <span class="help-code">.avi</span>, <span class="help-code">.ts</span>) are often not playable directly in browsers.
+                Camero can <b>remux</b> the file so the browser can play it.
+              </div>
+              <div class="help-p">
+                Remuxing changes the container but keeps audio/video streams as-is (no re-encoding).
+              </div>
+            </div>
+            <div class="help-note">
+              <div class="help-h2">Transcode</div>
+              <div class="help-p">
+                Transcoding (re-encoding) is used when you need a different codec/format or want standardized outputs.
+                It runs as a background job and shows progress.
+              </div>
+              <div class="help-p">
+                While a transcode job is running, Camero can show a floating progress widget. You can restore the full dialog from it.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Streamers</div>
+          <div class="help-p">
+            The <b>Streamers</b> view lists detected streamers and lets you:
+          </div>
+          <ul class="help-list">
+            <li>Filter by site, search by name, and use A–Z shortcuts.</li>
+            <li>Open a streamer to view their recordings and edit their site association.</li>
+            <li>Fetch missing streamer info (if supported for the selected site).</li>
+          </ul>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Sites</div>
+          <div class="help-p">
+            The <b>Sites</b> page shows an overview (recordings count, models count) and provides quick navigation to recordings or streamers filtered by that site.
+          </div>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Tags</div>
+          <div class="help-p">
+            Tags are your main way to group and filter recordings across different sites/streamers.
+          </div>
+          <ul class="help-list">
+            <li>Create tags on the <b>Tags</b> page, or assign them from the Recordings view.</li>
+            <li>Rename or delete tags (deleting removes the tag from all recordings).</li>
+            <li>Open a tag to browse recordings filtered by that tag.</li>
+          </ul>
+        </div>
+
+        <div class="list-item help-danger">
+          <div class="help-section-title">Data safety notes</div>
+          <ul class="help-list">
+            <li><b>Delete</b> actions remove files from disk. Use with care.</li>
+            <li><b>Move/Copy</b> can target any folder. Moving outside the catalog removes those items from the catalog.</li>
+            <li>Camero stores its catalog database and generated assets under <span class="help-code">.camero/</span> inside the catalog root.</li>
+          </ul>
+        </div>
+
+        <div class="list-item">
+          <div class="help-section-title">Troubleshooting</div>
+          <ul class="help-list">
+            <li><b>"Catalog root is not configured"</b>: open Settings and set the catalog folder path.</li>
+            <li><b>Wrong streamer/site/date</b>: adjust the filename regex and use <b>Rescan metadata</b>, or edit metadata from the recording modal.</li>
+            <li><b>Video won’t play in the browser</b>: use <b>Make playable (remux MP4)</b> (especially for MKV/AVI/TS).</li>
+            <li><b>No thumbnails/avatars</b>: set them from the recording modal using the current player frame.</li>
+            <li><b>FFmpeg warning banner</b>: Camero requires FFmpeg/FFprobe. Install FFmpeg and add it to PATH (or place the executables next to the app), then click <b>Retry</b>.</li>
+          </ul>
+          <div class="help-p" style="margin-top:10px">
+            Last updated: 2026-01-17
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script>
+      (function() {
+        function getPreferredTheme() {
+          const stored = localStorage.getItem('camero.theme');
+          if (stored === 'light' || stored === 'dark') return stored;
+          return 'dark';
+        }
+
+        function applyTheme(theme) {
+          const t = (theme === 'light') ? 'light' : 'dark';
+          document.documentElement.dataset.theme = t;
+          localStorage.setItem('camero.theme', t);
+          const btn = document.getElementById('themeToggle');
+          if (btn) btn.textContent = (t === 'light') ? '☀' : '🌙';
+        }
+
+        function toggleTheme() {
+          const current = document.documentElement.dataset.theme || 'dark';
+          applyTheme(current === 'light' ? 'dark' : 'light');
+        }
+
+        applyTheme(getPreferredTheme());
+        const btn = document.getElementById('themeToggle');
+        if (btn) btn.addEventListener('click', toggleTheme);
+      })();
+    </script>
+  </body>
+</html>

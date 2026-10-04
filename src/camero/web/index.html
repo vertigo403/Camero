@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Camero</title>
+
+    <link rel="stylesheet" href="/static/styles.css?v=0.3.20" />
+    <link rel="stylesheet" href="https://vjs.zencdn.net/8.10.0/video-js.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img class="brand-logo" src="/assets/camero.png" alt="Camero" />
+        <span>Camero</span>
+        <span class="brand-sep">|</span>
+        <span class="brand-catalog-label">Catalog:</span>
+        <span id="catalogPaths" class="brand-catalog-paths"></span>
+        <span class="brand-sep">|</span>
+        <span class="brand-donate-text">Like the app?</span>
+        <button id="donateBtn" class="btn btn-ghost btn-donate" type="button" aria-label="Donate">
+          <img class="donate-btn-icon" src="/assets/heart.svg" alt="" aria-hidden="true" />
+          Donate
+        </button>
+      </div>
+      <nav class="nav">
+        <a class="nav-item" href="#recordings" data-route="recordings">Recordings</a>
+        <a class="nav-item" href="#streamers" data-route="streamers">Streamers</a>
+        <a class="nav-item" href="#sites" data-route="sites">Sites</a>
+        <a class="nav-item" href="#tags" data-route="tags">Tags</a>
+        <a class="nav-item" href="/static/help.html" target="_blank" rel="noopener" title="Help" aria-label="Help">
+          <span aria-hidden="true">❔</span>
+        </a>
+        <button id="themeToggle" class="nav-button" type="button" title="Toggle theme" aria-label="Toggle theme">🌙</button>
+        <a class="nav-item nav-item-gear" href="#settings" data-route="settings" title="Settings" aria-label="Settings">
+          <span class="gear">⚙</span>
+        </a>
+      </nav>
+    </header>
+
+    <div id="ffmpegBanner" class="global-banner" hidden>
+      <div class="global-banner-inner">
+        <div class="global-banner-text">
+          <div class="global-banner-title">FFmpeg no encontrado</div>
+          <div id="ffmpegBannerMsg" class="global-banner-msg"></div>
+        </div>
+        <div class="global-banner-actions">
+          <button id="ffmpegBannerRetry" class="btn btn-ghost" type="button">Reintentar</button>
+        </div>
+      </div>
+    </div>
+
+    <main class="container">
+      <div id="toast" class="toast" hidden></div>
+      <div id="view"></div>
+    </main>
+
+    <div id="reencFloating" class="floating-progress" hidden>
+      <div class="floating-progress-main">
+        <div class="floating-progress-title">Transcode</div>
+        <div class="progress-row" style="margin-top:8px">
+          <div class="progress"><div id="reencFloatBar" class="progress-bar" style="width:0%"></div></div>
+          <div id="reencFloatPct" class="subtle" style="min-width:62px; text-align:right">0%</div>
+        </div>
+        <div id="reencFloatStatus" class="subtle" style="margin-top:6px"></div>
+      </div>
+      <button id="reencFloatRestore" class="btn btn-ghost floating-progress-restore" type="button" title="Restore Transcode dialog" aria-label="Restore Transcode dialog">⤢</button>
+    </div>
+
+    <div id="moveCopyFloating" class="floating-progress" hidden>
+      <div class="floating-progress-main">
+        <div id="moveCopyFloatTitle" class="floating-progress-title">Move/Copy</div>
+        <div class="subtle" style="margin-top:6px; display:flex; align-items:center; gap:8px">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="moveCopyFloatStatus"></span>
+        </div>
+      </div>
+    </div>
+
+
+    <div id="modal" class="modal" hidden>
+      <div class="modal-backdrop" data-action="close"></div>
+      <div class="modal-panel">
+        <div class="modal-header">
+          <div id="modalTitle" class="modal-title"></div>
+          <button class="btn btn-ghost" data-action="close">Close</button>
+        </div>
+        <div id="modalBody" class="modal-body"></div>
+      </div>
+    </div>
+
+    <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+    <script src="/static/app.js?v=0.3.19"></script>
+  </body>
+</html>

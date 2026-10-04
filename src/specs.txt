@@ -1,0 +1,32 @@
+Especificaciones de la aplicación Camero
+------------------------------------------
+
+La aplicación sirve para gestionar un catálogo de videos de sesiones de stream y de streamers. El catálogo consiste en un directorio que tiene escenas de video que se corresponden con grabaciones de streams de video en directo. En cada grabación participa un streamer. Los streamers están asociados a sitios de streaming (sites).
+
+Especificaciones técnicas
+-------------------------
+La aplicación debe ser una aplicación programada en python con la librería FastAPI para el backend, y la parte de interfaz usará HTML, CSS y Javascript, utilizando las librerías JS adecuadas para hacer que la ineterfaz sea limpia y atractiva. Como base de datos usaremos sqlite, con un fichero por catálogo. Para las consultas usaremos graphql.
+Al ejecutar la aplicación se debe lanzar un servidor http embebido y abrir la página principal en la dirección configurada para el backend. Por defecto será 127.0.0.1:6969, pero la IP/host y el puerto deben poder configurarse, incluyendo una IP externa.
+
+Especificaciones funcionales
+----------------------------
+El idioma para la interfaz y los mensajes debe ser inglés.
+La aplicación debe permitir:
+- Especificar el directorio raíz de un catálogo (la carpeta que contiene los videos)
+- Escanear y parsear los videos en la carpeta de catálogo y en sus subcarpetas.
+- Parsear cada video extrayendo del nombre de fichero la siguiente información:
+	- Nombre de streamer
+	- Nombre del site
+	- Fecha de grabación del streamer
+	Las grabaciones siguen por defecto un patrón <nombre_streamer>_<nombre_site>_<fecha:YYYYMMDD>_<time>.<ext>, aunque el patrón debe ser configurable para que la aplicación pueda parsear videos que siguen patrones diferentes.
+- Recuperar información de un streamer de internet.
+- Al iniciar la aplicación debe aparecer en la página web una cabecera con el menú de opciones: Grabaciones, Sites, Etiquetas y Configuración. Configuración debe aparecer como una rueda dentada y justificado a la derecha.
+- En Grabaciones se muestra el panel de grabaciones. En este panel se muestran las grabaciones en el catálogo, de forma paginada. Por defecto se muetsran 20 elementos, pero el usuario puede elegir cuantos elementos quiere ver de forma simultanea.
+- Cada grabación en el panel de grabaciones se muestra como una tarjeta con información del video, mostrando una imagen del video (un fotograma), el título, la duración, el tamaño en disco, la resolución, el nombre del streamer, el nombre del site, la fecha de la grabación y etiquetras si tiene. Las tarjetas deben tener un checkbox para poder marcar y seleccionar grabacions para luego poder hacer acciones con ellas (recuperar información de internet, borrarlas, copiarlas o moverlas a otra subcarpeta,recodificar el video, y asignar etiquetas).
+- Si se pincha en una grabación se debe mostrar la información detallada de la grabación y un reproductor de video JS para visualizar el video.
+- Si se pincha en Streamer, se ven tarjetas con información de los streamers en el catálogo: Si el streamner tiene foto de avatar, se muestra en la tarjeta. si no lo tiene, se muetsra una imagen genérica.
+- Al pinchar en un streamer se muestran las grabaciones en las que interviene ese streamer, y se deb poder gestionar esas grabaciones de forma similar a como se hacía en la vista de grabaciones. También debe haber una opción para recuperar información del streamer desde internet (de momento lo dejamos como una llamada a una función vacía en el backend que recibe como parámetros el nombre del streamer y el nombre del sitio).
+- En la vista de sites se deben poder ver los streamers asociados a ese site, y las grabaciones asociadas a ese site, y se deben poder gestionar.
+- En la vista de etiquetas podremos ver las etiquetas definidas y ver las grabaciones asociadas a etiquetas.
+
+- En la configuración veremos el panel de configuración de la aplicación.
