@@ -10,6 +10,7 @@ Camero is a local catalog manager for recorded stream sessions.
   - site name
   - recording date
 - Browse recordings (paginated cards), sites, tags and configuration
+- Search recordings semantically from the Recordings view using text descriptions
 - UI uses GraphQL queries against the backend
 
 ## Run
@@ -63,3 +64,18 @@ than 100 MB. Obtain the required model files separately and place them in
 	It enumerates mount points using the Python package `psutil` (no external commands).
 
 - Streamer "internet info" is currently a backend stub (as requested in specs).
+
+### Semantic video search
+
+The **Semantic search** control in the Recordings view indexes each video from its
+contact-sheet image. If a contact sheet is missing, Camero creates one from at
+most 30 key frames using FFmpeg. Each embedding retains the recording id, title,
+model/streamer name, and site name as metadata.
+
+Configure the model directory and the minimum similarity threshold in
+**Settings → AI**. By default, the model directory is `models` next to the
+frozen executable (or the repository's `models` directory during development).
+EmbeddingGemma V2 is downloaded to that directory during catalog scanning. Search
+only retrieves from the completed local index, so it never waits for video
+indexing or model downloads. Later scans only reindex recordings whose media
+fingerprint or indexed metadata changed.

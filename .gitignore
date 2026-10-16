@@ -173,6 +173,7 @@ storage/
 *.sqlite-shm
 *.sqlite-wal
 models/*.onnx
+models/*.litertlm*
 src/ffmpeg.exe
 src/ffprobe.exe
 

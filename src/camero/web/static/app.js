@@ -117,6 +117,10 @@ const state = {
     dir: 'DESC',
   },
   recordingsFilter: getStoredRecordingsFilter(),
+  semanticSearch: {
+    query: '',
+    recordingIds: null,
+  },
   selected: new Set(),
   // Best-effort client-side hiding for items just deleted.
   // Some environments can show brief eventual consistency where the list still returns deleted ids.
@@ -664,6 +668,15 @@ function updateScanProgressUI(job) {
     const suffix = fp ? ` (failed ${fp})` : '';
     line1 = tp != null ? `Auto-tagging ${gp}/${tp}${suffix}` : `Auto-tagging ${gp}${suffix}`;
     file = p.currentRecording ? `Recording: ${p.currentRecording}` : '';
+  } else if (phase === 'semantic_index') {
+    const totalEmbeddings = p.totalEmbeddings ?? null;
+    const indexedEmbeddings = p.indexedEmbeddings ?? 0;
+    const failedEmbeddings = p.failedEmbeddings ?? 0;
+    const suffix = failedEmbeddings ? ` (failed ${failedEmbeddings})` : '';
+    line1 = totalEmbeddings != null
+      ? `Semantic indexing ${indexedEmbeddings}/${totalEmbeddings}${suffix}`
+      : `Semantic indexing ${indexedEmbeddings}${suffix}`;
+    file = p.currentEmbedding ? `Recording: ${p.currentEmbedding}` : '';
   } else {
     line1 = total != null ? `Scanned ${scanned}/${total} files` : `Scanned ${scanned} files`;
     file = p.currentFile ? `Current: ${p.currentFile}` : '';
@@ -688,7 +701,7 @@ function stopScanPolling() {
 async function pollScanJobOnce(jobId) {
   if (!jobId) return;
   const data = await gql(
-      `query($jobId:String!){ scanJob(jobId:$jobId){ jobId status error progress { phase totalFiles scannedFiles added updated skipped errors currentFile currentRecording totalPreviews generatedPreviews failedPreviews currentPreview percent } result { scannedFiles added updated skipped errors } } }`,
+      `query($jobId:String!){ scanJob(jobId:$jobId){ jobId status error progress { phase totalFiles scannedFiles added updated skipped errors currentFile currentRecording totalPreviews generatedPreviews failedPreviews currentPreview totalEmbeddings processedEmbeddings indexedEmbeddings failedEmbeddings currentEmbedding percent } result { scannedFiles added updated skipped errors } } }`,
     { jobId }
   );
 
@@ -2310,7 +2323,7 @@ async function render() {
 
 async function renderSettings() {
   const DEFAULT_FILENAME_TEMPLATE = '{streamer}_{site}_{YYYYMMDD}_{HHMMSS}{wildcard}.{ext}';
-  const data = await gql(`query { appConfig { catalogRoot filenameRegex catalogFolders { key path filenameRegex filenameTemplate matchPath } generateLivePreviews livePreviewSegments periodicScanEnabled periodicScanIntervalMinutes autoTagAfterScan autoTagConfidence autoTagSceneThreshold autoTagFrameInterval backendHost backendPort authRequired authUsername authPassword } }`);
+  const data = await gql(`query { appConfig { catalogRoot filenameRegex catalogFolders { key path filenameRegex filenameTemplate matchPath } generateLivePreviews livePreviewSegments periodicScanEnabled periodicScanIntervalMinutes autoTagAfterScan autoTagConfidence autoTagSceneThreshold autoTagFrameInterval aiModelsDir semanticSearchMinSimilarity backendHost backendPort authRequired authUsername authPassword } }`);
   const cfg = data.appConfig;
 
   let recordingsTotal = 0;
@@ -2340,6 +2353,7 @@ async function renderSettings() {
           <div class="settings-tabbar-wrap">
             <div class="settings-tabs" role="tablist" aria-label="Settings sections">
               <button id="settingsTabCatalog" class="settings-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="settingsPanelCatalog" tabindex="0" data-settings-tab="catalog">Catalog</button>
+              <button id="settingsTabAi" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelAi" tabindex="-1" data-settings-tab="ai">AI</button>
               <button id="settingsTabNetwork" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelNetwork" tabindex="-1" data-settings-tab="network">Network</button>
             </div>
           </div>
@@ -2477,6 +2491,30 @@ async function renderSettings() {
                 </label>
               </div>
               <div class="subtle" style="margin-top:8px">When enabled, Camero starts a new scan only if there is no other scan already running.</div>
+            </div>
+          </section>
+
+          <section id="settingsPanelAi" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabAi" data-settings-panel="ai" hidden>
+            <div class="settings-panel-summary">
+              <div class="settings-panel-eyebrow">AI</div>
+              <div class="settings-panel-title">Semantic video search</div>
+              <div class="settings-panel-copy">Search recordings by the visual content of their contact sheets. Missing contact sheets are generated from up to 30 key frames.</div>
+            </div>
+
+            <div class="panel settings-section-panel">
+              <label style="display:flex; flex-direction:column; gap:6px">
+                <div class="subtle">AI models directory</div>
+                <input id="aiModelsDir" class="input" value="${escapeHtml(cfg.aiModelsDir || '')}" placeholder="models" />
+              </label>
+              <div class="subtle" style="margin-top:8px">EmbeddingGemma V2 is downloaded here automatically when a semantic search first needs it.</div>
+            </div>
+
+            <div class="panel settings-section-panel">
+              <label style="display:flex; flex-direction:column; gap:6px; max-width:340px">
+                <div class="subtle">Minimum similarity (0 to 1)</div>
+                <input id="semanticSearchMinSimilarity" class="input" type="number" min="0" max="1" step="0.01" value="${escapeHtml(String(cfg.semanticSearchMinSimilarity ?? 0.15))}" />
+              </label>
+              <div class="subtle" style="margin-top:8px">Only videos whose contact sheet meets this similarity threshold are shown.</div>
             </div>
           </section>
 
@@ -3135,6 +3173,8 @@ async function renderSettings() {
     const autoTagConfidence = Number(document.getElementById('autoTagConfidence')?.value ?? cfg.autoTagConfidence ?? 0.6);
     const autoTagSceneThreshold = Number(document.getElementById('autoTagSceneThreshold')?.value ?? cfg.autoTagSceneThreshold ?? 0.35);
     const autoTagFrameInterval = String(document.getElementById('autoTagFrameInterval')?.value || cfg.autoTagFrameInterval || 'auto');
+    const aiModelsDir = String(document.getElementById('aiModelsDir')?.value || '').trim();
+    const semanticSearchMinSimilarity = Number(document.getElementById('semanticSearchMinSimilarity')?.value ?? cfg.semanticSearchMinSimilarity ?? 0.15);
     const backendHost = String(document.getElementById('backendHost')?.value || cfg.backendHost || '127.0.0.1').trim();
     const backendPort = Number(document.getElementById('backendPort')?.value || cfg.backendPort || 6969);
     const authRequired = !!document.getElementById('networkAuthRequired')?.checked;
@@ -3154,6 +3194,9 @@ async function renderSettings() {
     }
     if (authRequired && !authPassword) {
       throw new Error('Password is required when authentication is enabled');
+    }
+    if (!Number.isFinite(semanticSearchMinSimilarity) || semanticSearchMinSimilarity < 0 || semanticSearchMinSimilarity > 1) {
+      throw new Error('Minimum semantic-search similarity must be between 0 and 1');
     }
     const backendChanged = backendHost !== String(cfg.backendHost || '127.0.0.1') || backendPort !== Number(cfg.backendPort || 6969);
     const authChanged = authRequired !== !!cfg.authRequired
@@ -3273,6 +3316,14 @@ async function renderSettings() {
           { required: authRequired, username: authUsername, password: authPassword }
         );
       }
+      await gql(
+        `mutation($value:String!){ setAiModelsDir(aiModelsDir:$value){ aiModelsDir } }`,
+        { value: aiModelsDir }
+      );
+      await gql(
+        `mutation($value:Float!){ setSemanticSearchMinSimilarity(semanticSearchMinSimilarity:$value){ semanticSearchMinSimilarity } }`,
+        { value: semanticSearchMinSimilarity }
+      );
       showToast((backendChanged || authChanged) ? 'Settings saved. Restart Camero to apply network changes.' : 'Settings saved');
       refreshCatalogInfo().catch(() => {});
 
@@ -3302,7 +3353,7 @@ async function renderSettings() {
       }
       if (saveBtn) saveBtn.disabled = true;
 
-      await gql(`mutation { resetAppConfig { catalogRoot filenameRegex catalogFolders { key path filenameRegex } generateLivePreviews livePreviewSegments periodicScanEnabled periodicScanIntervalMinutes backendHost backendPort authRequired authUsername authPassword } }`);
+      await gql(`mutation { resetAppConfig { catalogRoot filenameRegex catalogFolders { key path filenameRegex } generateLivePreviews livePreviewSegments periodicScanEnabled periodicScanIntervalMinutes aiModelsDir semanticSearchMinSimilarity backendHost backendPort authRequired authUsername authPassword } }`);
       showToast('Settings reset');
       await renderSettings();
       refreshCatalogInfo().catch(() => {});
@@ -3432,6 +3483,12 @@ async function renderRecordings(options = {}) {
   const extraFilter = options.filter || {};
   const includeHeader = options.includeHeader !== false;
   const idPrefix = options.idPrefix || 'rec';
+  const isSemanticSearchView = (
+    includeHeader
+    && !extraFilter.streamerName
+    && !extraFilter.siteName
+    && !extraFilter.tagName
+  );
   const streamersHref = extraFilter.siteName
     ? `#streamers:${encodeURIComponent(extraFilter.siteName)}`
     : '#streamers';
@@ -3466,7 +3523,7 @@ async function renderRecordings(options = {}) {
 
   let config;
   try {
-    config = (await gql(`query { appConfig { catalogRoot } }`)).appConfig;
+    config = (await gql(`query { appConfig { catalogRoot semanticSearchMinSimilarity } }`)).appConfig;
   } catch {
     config = { catalogRoot: null };
   }
@@ -3526,9 +3583,21 @@ async function renderRecordings(options = {}) {
           <path d="M3 5h18l-7 8v5l-4 2v-7L3 5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
         </svg>
       </button>
+      ${hasCatalog && isSemanticSearchView ? `<button id="${idPrefix}-semanticSearchBtn" class="btn" type="button" aria-expanded="false">Semantic search</button>` : ''}
     </div>
 
     ${hasCatalog ? `
+      ${isSemanticSearchView ? `
+        <div id="${idPrefix}-semanticSearchPanel" class="semantic-search-panel" hidden>
+          <label class="semantic-search-label" for="${idPrefix}-semanticSearchInput">Describe what you want to find</label>
+          <div class="semantic-search-controls">
+            <input id="${idPrefix}-semanticSearchInput" class="input" type="search" placeholder="e.g. person outdoors at night" value="${escapeHtml(state.semanticSearch.query || '')}" />
+            <button id="${idPrefix}-semanticSearchSubmit" class="btn btn-primary" type="button">OK</button>
+            <button id="${idPrefix}-semanticSearchClear" class="btn" type="button" ${state.semanticSearch.recordingIds === null ? 'hidden' : ''}>Clear</button>
+          </div>
+          <div id="${idPrefix}-semanticSearchStatus" class="subtle" aria-live="polite"></div>
+        </div>
+      ` : ''}
       <div id="scanProgressWrap" class="progress-wrap" hidden>
         <div class="progress-row">
           <div class="progress"><div id="scanProgressBar" class="progress-bar" style="width:0%"></div></div>
@@ -3604,6 +3673,12 @@ async function renderRecordings(options = {}) {
   const autoPreviewBtn = document.getElementById(`${idPrefix}-autoPreview`);
   const filtersBtn = document.getElementById(`${idPrefix}-filtersBtn`);
   const toolbarEl = rootEl.querySelector('.toolbar');
+  const semanticSearchBtn = document.getElementById(`${idPrefix}-semanticSearchBtn`);
+  const semanticSearchPanel = document.getElementById(`${idPrefix}-semanticSearchPanel`);
+  const semanticSearchInput = document.getElementById(`${idPrefix}-semanticSearchInput`);
+  const semanticSearchSubmit = document.getElementById(`${idPrefix}-semanticSearchSubmit`);
+  const semanticSearchClear = document.getElementById(`${idPrefix}-semanticSearchClear`);
+  const semanticSearchStatus = document.getElementById(`${idPrefix}-semanticSearchStatus`);
 
   const scanBtn = document.getElementById('scan');
   const genMissingBtn = document.getElementById('generateMissingLivePreviews');
@@ -3611,6 +3686,80 @@ async function renderRecordings(options = {}) {
   const stopLivePreviewsBtn = document.getElementById('stopLivePreviews');
   const autoTagUntaggedBtn = document.getElementById('autoTagUntagged');
   const stopAutoTagBtn = document.getElementById('stopAutoTag');
+
+  function setSemanticSearchStatus(message) {
+    if (semanticSearchStatus) semanticSearchStatus.textContent = message || '';
+  }
+
+  async function runSemanticSearch() {
+    const query = String(semanticSearchInput?.value || '').trim();
+    if (!query) {
+      setSemanticSearchStatus('Enter a description to search.');
+      semanticSearchInput?.focus();
+      return;
+    }
+    if (semanticSearchSubmit) {
+      semanticSearchSubmit.disabled = true;
+      semanticSearchSubmit.textContent = 'Searching…';
+    }
+    setSemanticSearchStatus('Indexing contact sheets and searching…');
+    try {
+      const data = await gql(
+        `query($query:String!, $threshold:Float!) {
+          semanticSearch(query:$query, limit:100, minSimilarity:$threshold) {
+            recordingId
+            score
+          }
+        }`,
+        { query, threshold: Number(config.semanticSearchMinSimilarity ?? 0.15) }
+      );
+      const matches = Array.isArray(data?.semanticSearch) ? data.semanticSearch : [];
+      state.semanticSearch.query = query;
+      state.semanticSearch.recordingIds = matches
+        .map(match => Number(match?.recordingId))
+        .filter(recordingId => Number.isInteger(recordingId) && recordingId > 0);
+      state.offset = 0;
+      if (semanticSearchClear) semanticSearchClear.hidden = false;
+      setSemanticSearchStatus(`${state.semanticSearch.recordingIds.length} relevant video${state.semanticSearch.recordingIds.length === 1 ? '' : 's'} found.`);
+      await load();
+    } catch (err) {
+      setSemanticSearchStatus('');
+      showToast(err.message || String(err));
+    } finally {
+      if (semanticSearchSubmit) {
+        semanticSearchSubmit.disabled = false;
+        semanticSearchSubmit.textContent = 'OK';
+      }
+    }
+  }
+
+  if (semanticSearchBtn && semanticSearchPanel) {
+    semanticSearchBtn.onclick = () => {
+      semanticSearchPanel.hidden = !semanticSearchPanel.hidden;
+      semanticSearchBtn.setAttribute('aria-expanded', semanticSearchPanel.hidden ? 'false' : 'true');
+      if (!semanticSearchPanel.hidden) semanticSearchInput?.focus();
+    };
+  }
+  if (semanticSearchSubmit) semanticSearchSubmit.onclick = runSemanticSearch;
+  if (semanticSearchInput) {
+    semanticSearchInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        runSemanticSearch();
+      }
+    });
+  }
+  if (semanticSearchClear) {
+    semanticSearchClear.onclick = async () => {
+      state.semanticSearch.query = '';
+      state.semanticSearch.recordingIds = null;
+      state.offset = 0;
+      semanticSearchInput.value = '';
+      semanticSearchClear.hidden = true;
+      setSemanticSearchStatus('');
+      await load();
+    };
+  }
 
   async function startScanJobFromUI() {
     if (!hasCatalog) return false;
@@ -4459,31 +4608,34 @@ async function renderRecordings(options = {}) {
     const ids = [];
 
     while (total == null || offset < total) {
+      const semanticRecordingIds = isSemanticSearchView ? state.semanticSearch.recordingIds : null;
+      const semanticSearchActive = Array.isArray(semanticRecordingIds);
       const vars = {
         limit: chunk,
         offset,
-        search: state.search || null,
-        nameContains: (state.recordingsFilter?.nameContains || '').trim() || null,
-        negateNameContains: state.recordingsFilter?.negateNameContains ? true : null,
-        nameContainsRegex: state.recordingsFilter?.nameContainsRegex ? true : null,
+        search: semanticSearchActive ? null : (state.search || null),
+        nameContains: semanticSearchActive ? null : ((state.recordingsFilter?.nameContains || '').trim() || null),
+        negateNameContains: semanticSearchActive ? null : (state.recordingsFilter?.negateNameContains ? true : null),
+        nameContainsRegex: semanticSearchActive ? null : (state.recordingsFilter?.nameContainsRegex ? true : null),
         streamerName: extraFilter.streamerName || null,
         siteName: extraFilter.siteName || null,
         tagName: extraFilter.tagName || null,
-        missingLivePreview: state.recordingsFilter?.missingLivePreview ? true : null,
-        minSizeBytes: state.recordingsFilter?.minSizeBytes ?? null,
-        maxSizeBytes: state.recordingsFilter?.maxSizeBytes ?? null,
-        minDurationSeconds: state.recordingsFilter?.minDurationSeconds ?? null,
-        maxDurationSeconds: state.recordingsFilter?.maxDurationSeconds ?? null,
-        minShortSide: state.recordingsFilter?.minShortSide ?? null,
-        maxShortSide: state.recordingsFilter?.maxShortSide ?? null,
-        videoCodecs: (state.recordingsFilter?.videoCodecs || []).length ? state.recordingsFilter.videoCodecs : null,
+        missingLivePreview: semanticSearchActive ? null : (state.recordingsFilter?.missingLivePreview ? true : null),
+        minSizeBytes: semanticSearchActive ? null : (state.recordingsFilter?.minSizeBytes ?? null),
+        maxSizeBytes: semanticSearchActive ? null : (state.recordingsFilter?.maxSizeBytes ?? null),
+        minDurationSeconds: semanticSearchActive ? null : (state.recordingsFilter?.minDurationSeconds ?? null),
+        maxDurationSeconds: semanticSearchActive ? null : (state.recordingsFilter?.maxDurationSeconds ?? null),
+        minShortSide: semanticSearchActive ? null : (state.recordingsFilter?.minShortSide ?? null),
+        maxShortSide: semanticSearchActive ? null : (state.recordingsFilter?.maxShortSide ?? null),
+        videoCodecs: semanticSearchActive ? null : ((state.recordingsFilter?.videoCodecs || []).length ? state.recordingsFilter.videoCodecs : null),
+        recordingIds: semanticRecordingIds,
         orderBy: state.recordingsSort.by,
         orderDir: state.recordingsSort.dir,
       };
 
       const data = await gql(
-        `query($limit:Int!, $offset:Int!, $search:String, $nameContains:String, $negateNameContains:Boolean, $nameContainsRegex:Boolean, $streamerName:String, $siteName:String, $tagName:String, $missingLivePreview:Boolean, $minSizeBytes:Float, $maxSizeBytes:Float, $minDurationSeconds:Float, $maxDurationSeconds:Float, $minShortSide:Int, $maxShortSide:Int, $videoCodecs:[String!], $orderBy:RecordingOrderBy, $orderDir:SortDirection) {
-          recordings(limit:$limit, offset:$offset, search:$search, nameContains:$nameContains, negateNameContains:$negateNameContains, nameContainsRegex:$nameContainsRegex, streamerName:$streamerName, siteName:$siteName, tagName:$tagName, missingLivePreview:$missingLivePreview, minSizeBytes:$minSizeBytes, maxSizeBytes:$maxSizeBytes, minDurationSeconds:$minDurationSeconds, maxDurationSeconds:$maxDurationSeconds, minShortSide:$minShortSide, maxShortSide:$maxShortSide, videoCodecs:$videoCodecs, orderBy:$orderBy, orderDir:$orderDir) {
+        `query($limit:Int!, $offset:Int!, $search:String, $nameContains:String, $negateNameContains:Boolean, $nameContainsRegex:Boolean, $streamerName:String, $siteName:String, $tagName:String, $missingLivePreview:Boolean, $minSizeBytes:Float, $maxSizeBytes:Float, $minDurationSeconds:Float, $maxDurationSeconds:Float, $minShortSide:Int, $maxShortSide:Int, $videoCodecs:[String!], $recordingIds:[Int!], $orderBy:RecordingOrderBy, $orderDir:SortDirection) {
+          recordings(limit:$limit, offset:$offset, search:$search, nameContains:$nameContains, negateNameContains:$negateNameContains, nameContainsRegex:$nameContainsRegex, streamerName:$streamerName, siteName:$siteName, tagName:$tagName, missingLivePreview:$missingLivePreview, minSizeBytes:$minSizeBytes, maxSizeBytes:$maxSizeBytes, minDurationSeconds:$minDurationSeconds, maxDurationSeconds:$maxDurationSeconds, minShortSide:$minShortSide, maxShortSide:$maxShortSide, videoCodecs:$videoCodecs, recordingIds:$recordingIds, orderBy:$orderBy, orderDir:$orderDir) {
             total
             items { id }
           }
@@ -4563,31 +4715,34 @@ async function renderRecordings(options = {}) {
       return;
     }
 
+    const semanticRecordingIds = isSemanticSearchView ? state.semanticSearch.recordingIds : null;
+    const semanticSearchActive = Array.isArray(semanticRecordingIds);
     const vars = {
       limit: state.pageSize,
       offset: state.offset,
-      search: state.search || null,
-      nameContains: (state.recordingsFilter?.nameContains || '').trim() || null,
-      negateNameContains: state.recordingsFilter?.negateNameContains ? true : null,
-      nameContainsRegex: state.recordingsFilter?.nameContainsRegex ? true : null,
+      search: semanticSearchActive ? null : (state.search || null),
+      nameContains: semanticSearchActive ? null : ((state.recordingsFilter?.nameContains || '').trim() || null),
+      negateNameContains: semanticSearchActive ? null : (state.recordingsFilter?.negateNameContains ? true : null),
+      nameContainsRegex: semanticSearchActive ? null : (state.recordingsFilter?.nameContainsRegex ? true : null),
       streamerName: extraFilter.streamerName || null,
       siteName: extraFilter.siteName || null,
       tagName: extraFilter.tagName || null,
-      missingLivePreview: state.recordingsFilter?.missingLivePreview ? true : null,
-      minSizeBytes: state.recordingsFilter?.minSizeBytes ?? null,
-      maxSizeBytes: state.recordingsFilter?.maxSizeBytes ?? null,
-      minDurationSeconds: state.recordingsFilter?.minDurationSeconds ?? null,
-      maxDurationSeconds: state.recordingsFilter?.maxDurationSeconds ?? null,
-      minShortSide: state.recordingsFilter?.minShortSide ?? null,
-      maxShortSide: state.recordingsFilter?.maxShortSide ?? null,
-      videoCodecs: (state.recordingsFilter?.videoCodecs || []).length ? state.recordingsFilter.videoCodecs : null,
+      missingLivePreview: semanticSearchActive ? null : (state.recordingsFilter?.missingLivePreview ? true : null),
+      minSizeBytes: semanticSearchActive ? null : (state.recordingsFilter?.minSizeBytes ?? null),
+      maxSizeBytes: semanticSearchActive ? null : (state.recordingsFilter?.maxSizeBytes ?? null),
+      minDurationSeconds: semanticSearchActive ? null : (state.recordingsFilter?.minDurationSeconds ?? null),
+      maxDurationSeconds: semanticSearchActive ? null : (state.recordingsFilter?.maxDurationSeconds ?? null),
+      minShortSide: semanticSearchActive ? null : (state.recordingsFilter?.minShortSide ?? null),
+      maxShortSide: semanticSearchActive ? null : (state.recordingsFilter?.maxShortSide ?? null),
+      videoCodecs: semanticSearchActive ? null : ((state.recordingsFilter?.videoCodecs || []).length ? state.recordingsFilter.videoCodecs : null),
+      recordingIds: semanticRecordingIds,
       orderBy: state.recordingsSort.by,
       orderDir: state.recordingsSort.dir,
     };
 
     const data = await gql(`
-      query($limit:Int!, $offset:Int!, $search:String, $nameContains:String, $negateNameContains:Boolean, $nameContainsRegex:Boolean, $streamerName:String, $siteName:String, $tagName:String, $missingLivePreview:Boolean, $minSizeBytes:Float, $maxSizeBytes:Float, $minDurationSeconds:Float, $maxDurationSeconds:Float, $minShortSide:Int, $maxShortSide:Int, $videoCodecs:[String!], $orderBy:RecordingOrderBy, $orderDir:SortDirection) {
-        recordings(limit:$limit, offset:$offset, search:$search, nameContains:$nameContains, negateNameContains:$negateNameContains, nameContainsRegex:$nameContainsRegex, streamerName:$streamerName, siteName:$siteName, tagName:$tagName, missingLivePreview:$missingLivePreview, minSizeBytes:$minSizeBytes, maxSizeBytes:$maxSizeBytes, minDurationSeconds:$minDurationSeconds, maxDurationSeconds:$maxDurationSeconds, minShortSide:$minShortSide, maxShortSide:$maxShortSide, videoCodecs:$videoCodecs, orderBy:$orderBy, orderDir:$orderDir) {
+      query($limit:Int!, $offset:Int!, $search:String, $nameContains:String, $negateNameContains:Boolean, $nameContainsRegex:Boolean, $streamerName:String, $siteName:String, $tagName:String, $missingLivePreview:Boolean, $minSizeBytes:Float, $maxSizeBytes:Float, $minDurationSeconds:Float, $maxDurationSeconds:Float, $minShortSide:Int, $maxShortSide:Int, $videoCodecs:[String!], $recordingIds:[Int!], $orderBy:RecordingOrderBy, $orderDir:SortDirection) {
+        recordings(limit:$limit, offset:$offset, search:$search, nameContains:$nameContains, negateNameContains:$negateNameContains, nameContainsRegex:$nameContainsRegex, streamerName:$streamerName, siteName:$siteName, tagName:$tagName, missingLivePreview:$missingLivePreview, minSizeBytes:$minSizeBytes, maxSizeBytes:$maxSizeBytes, minDurationSeconds:$minDurationSeconds, maxDurationSeconds:$maxDurationSeconds, minShortSide:$minShortSide, maxShortSide:$maxShortSide, videoCodecs:$videoCodecs, recordingIds:$recordingIds, orderBy:$orderBy, orderDir:$orderDir) {
           total
           totalSizeBytes
           items { id title fileName relPath recordedAt durationSeconds width height sizeBytes videoCodec audioCodec thumbnailUrl livePreviewUrl contactSheetUrl streamer { name site { name } } site { name } tags { name } }
@@ -6183,7 +6338,7 @@ async function renderStreamers(siteName) {
       </label>
       <span class="subtle">${total} total • ${totalPages} pages</span>
       <span style="flex:1"></span>
-      <button id="bulkFetchStreamerInfoBtn" class="btn btn-primary btn-scan" title="Fetch info for all streamers missing info${decodedSite ? ' (current site only)' : ''}">Fetch streamers info</button>
+      <button id="bulkFetchStreamerInfoBtn" class="btn btn-primary btn-scan" title="Fetch info for all streamers missing info or a profile image${decodedSite ? ' (current site only)' : ''}">Fetch streamers info</button>
       <label class="checkbox" style="gap:8px">
         Page
         <select id="streamerPageSelect"></select>
@@ -6415,12 +6570,62 @@ async function renderStreamers(siteName) {
                   ? `<button class="btn" onclick="event.stopPropagation(); fetchStreamerInfo('${escapeJs(s.name)}', '${escapeJs(siteForFetch)}')">Fetch info</button>`
                   : `<button class="btn" disabled title="Site is unknown">Fetch info</button>`
                 }
+                <button
+                  class="icon-btn btn-danger"
+                  type="button"
+                  title="Delete streamer and all recordings"
+                  aria-label="Delete streamer ${escapeHtml(s.name)} and all recordings"
+                  data-delete-streamer-id="${Number(s.id || 0)}"
+                  data-delete-streamer-name="${escapeHtml(s.name)}"
+                  data-delete-streamer-recordings="${recordingsCount}"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+                    <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
               </div>
             </div>
           </div>
         </div>
       `;
     }).join('');
+
+    gridEl.querySelectorAll('[data-delete-streamer-id]').forEach(button => {
+      button.onclick = async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const streamerId = Number(button.dataset.deleteStreamerId);
+        const streamerName = button.dataset.deleteStreamerName || 'this streamer';
+        const recordingsCount = Number(button.dataset.deleteStreamerRecordings || 0);
+        if (!Number.isInteger(streamerId) || streamerId <= 0) {
+          showToast('Invalid streamer id');
+          return;
+        }
+        if (!confirm(`Delete "${streamerName}" and its ${recordingsCount} recording(s)? This cannot be undone.`)) {
+          return;
+        }
+
+        button.disabled = true;
+        try {
+          const res = await gql(
+            `mutation($streamerId:Int!){ deleteStreamer(streamerId:$streamerId){ ok message } }`,
+            { streamerId }
+          );
+          const result = res.deleteStreamer;
+          showToast(result.message);
+          if (result.ok) {
+            if (items.length === 1 && state.streamers.offset > 0) {
+              state.streamers.offset = Math.max(0, state.streamers.offset - state.streamers.pageSize);
+            }
+            await renderStreamers(siteName);
+          }
+        } catch (err) {
+          showToast(err.message);
+          button.disabled = false;
+        }
+      };
+    });
   }
 
   inputEl.oninput = (e) => {
@@ -6673,7 +6878,8 @@ async function syncActiveJobs() {
           progress {
             phase totalFiles scannedFiles added updated skipped errors
             currentFile currentRecording
-            totalPreviews generatedPreviews failedPreviews currentPreview percent
+            totalPreviews generatedPreviews failedPreviews currentPreview
+            totalEmbeddings processedEmbeddings indexedEmbeddings failedEmbeddings currentEmbedding percent
           }
           result { scannedFiles added updated skipped errors }
         }

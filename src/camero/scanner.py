@@ -29,7 +29,7 @@ class ScanResult:
 
 @dataclass(frozen=True)
 class ScanProgress:
-    phase: str = "scan"  # scan | live_previews (animated previews)
+    phase: str = "scan"  # scan | semantic_index | live_previews | auto_tagging
     total_files: int | None = None
     scanned_files: int = 0
     added: int = 0
@@ -43,6 +43,11 @@ class ScanProgress:
     generated_previews: int = 0
     failed_previews: int = 0
     current_preview: str | None = None
+    total_embeddings: int | None = None
+    processed_embeddings: int = 0
+    indexed_embeddings: int = 0
+    failed_embeddings: int = 0
+    current_embedding: str | None = None
 
 
 def _iter_video_files(root: Path):

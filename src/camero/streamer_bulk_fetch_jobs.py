@@ -111,7 +111,12 @@ def start_bulk_fetch_missing_streamer_info_job(
                     .select_from(Streamer)
                     .join(Site, Streamer.site_id == Site.id)
                     .where(Streamer.site_id.is_not(None))
-                    .where((Streamer.info_json.is_(None)) | (Streamer.info_json == ""))
+                    .where(
+                        (Streamer.info_json.is_(None))
+                        | (Streamer.info_json == "")
+                        | (Streamer.avatar_url.is_(None))
+                        | (Streamer.avatar_url == "")
+                    )
                 )
                 if site_filter:
                     stmt = stmt.where(Site.name == site_filter)

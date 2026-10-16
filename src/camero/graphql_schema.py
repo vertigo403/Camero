@@ -71,9 +71,13 @@ from .settings import (
     DEFAULT_AUTO_TAG_CONFIDENCE,
     DEFAULT_AUTO_TAG_SCENE_THRESHOLD,
     DEFAULT_AUTO_TAG_FRAME_INTERVAL,
+    DEFAULT_AI_MODELS_DIR,
+    DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY,
     _coerce_auto_tag_confidence,
     _coerce_auto_tag_scene_threshold,
     _coerce_auto_tag_frame_interval,
+    _coerce_ai_models_dir,
+    _coerce_semantic_search_min_similarity,
 )
 from .streamer_fetch import fetch_streamer_info
 from .streamer_bulk_fetch_jobs import (
@@ -89,6 +93,7 @@ from .catalog_paths import (
 )
 from .media import check_ffmpeg_installed, ensure_thumbnail, extract_frame_at_time, find_contact_sheet_path, probe_media, quick_file_hash
 from .logging_utils import get_logger
+from .semantic_search import index_semantic_recordings, search_semantic_recordings
 
 
 ContextDict = dict[str, object]
@@ -228,6 +233,8 @@ class AppConfig:
     auto_tag_confidence: float
     auto_tag_scene_threshold: float
     auto_tag_frame_interval: str
+    ai_models_dir: str
+    semantic_search_min_similarity: float
     backend_host: str
     backend_port: int
     auth_required: bool
@@ -279,6 +286,11 @@ def _settings_to_app_config(s: AppSettings) -> AppConfig:
         auto_tag_confidence=float(getattr(s, "auto_tag_confidence", DEFAULT_AUTO_TAG_CONFIDENCE) or DEFAULT_AUTO_TAG_CONFIDENCE),
         auto_tag_scene_threshold=float(getattr(s, "auto_tag_scene_threshold", DEFAULT_AUTO_TAG_SCENE_THRESHOLD) or DEFAULT_AUTO_TAG_SCENE_THRESHOLD),
         auto_tag_frame_interval=str(getattr(s, "auto_tag_frame_interval", DEFAULT_AUTO_TAG_FRAME_INTERVAL) or DEFAULT_AUTO_TAG_FRAME_INTERVAL),
+        ai_models_dir=str(getattr(s, "ai_models_dir", DEFAULT_AI_MODELS_DIR) or DEFAULT_AI_MODELS_DIR),
+        semantic_search_min_similarity=float(
+            getattr(s, "semantic_search_min_similarity", DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY)
+            or DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY
+        ),
         backend_host=str(getattr(s, "backend_host", DEFAULT_BACKEND_HOST) or DEFAULT_BACKEND_HOST),
         backend_port=int(getattr(s, "backend_port", DEFAULT_BACKEND_PORT) or DEFAULT_BACKEND_PORT),
         auth_required=bool(getattr(s, "auth_required", DEFAULT_AUTH_REQUIRED)),
@@ -303,6 +315,11 @@ def _clone_settings(s: AppSettings, **changes: object) -> AppSettings:
         "auto_tag_confidence": float(getattr(s, "auto_tag_confidence", DEFAULT_AUTO_TAG_CONFIDENCE) or DEFAULT_AUTO_TAG_CONFIDENCE),
         "auto_tag_scene_threshold": float(getattr(s, "auto_tag_scene_threshold", DEFAULT_AUTO_TAG_SCENE_THRESHOLD) or DEFAULT_AUTO_TAG_SCENE_THRESHOLD),
         "auto_tag_frame_interval": str(getattr(s, "auto_tag_frame_interval", DEFAULT_AUTO_TAG_FRAME_INTERVAL) or DEFAULT_AUTO_TAG_FRAME_INTERVAL),
+        "ai_models_dir": str(getattr(s, "ai_models_dir", DEFAULT_AI_MODELS_DIR) or DEFAULT_AI_MODELS_DIR),
+        "semantic_search_min_similarity": float(
+            getattr(s, "semantic_search_min_similarity", DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY)
+            or DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY
+        ),
         "backend_host": str(getattr(s, "backend_host", DEFAULT_BACKEND_HOST) or DEFAULT_BACKEND_HOST),
         "backend_port": int(getattr(s, "backend_port", DEFAULT_BACKEND_PORT) or DEFAULT_BACKEND_PORT),
         "auth_required": bool(getattr(s, "auth_required", DEFAULT_AUTH_REQUIRED)),
@@ -379,6 +396,15 @@ class RecordingConnection:
     total: int
     total_size_bytes: float | None = None
     items: list[RecordingType]
+
+
+@strawberry.type
+class SemanticSearchResultType:
+    recording_id: int
+    score: float
+    rel_path: str
+    file_name: str
+    title: str
 
 
 @strawberry.type
@@ -473,6 +499,11 @@ class ScanProgressType:
     generated_previews: int
     failed_previews: int
     current_preview: str | None
+    total_embeddings: int | None
+    processed_embeddings: int
+    indexed_embeddings: int
+    failed_embeddings: int
+    current_embedding: str | None
     percent: float
 
 
@@ -790,7 +821,12 @@ def _progress_to_type(p) -> ScanProgressType:
     scanned = getattr(p, "scanned_files", 0)
 
     percent = 0.0
-    if phase in ("live_previews", "auto_tagging"):
+    if phase == "semantic_index":
+        total_embeddings = getattr(p, "total_embeddings", None)
+        processed_embeddings = getattr(p, "processed_embeddings", 0)
+        if total_embeddings and total_embeddings > 0:
+            percent = min(100.0, max(0.0, (processed_embeddings / total_embeddings) * 100.0))
+    elif phase in ("live_previews", "auto_tagging"):
         tp = getattr(p, "total_previews", None)
         gp = getattr(p, "generated_previews", 0)
         if tp and tp > 0:
@@ -817,6 +853,11 @@ def _progress_to_type(p) -> ScanProgressType:
         generated_previews=int(getattr(p, "generated_previews", 0) or 0),
         failed_previews=int(getattr(p, "failed_previews", 0) or 0),
         current_preview=getattr(p, "current_preview", None),
+        total_embeddings=getattr(p, "total_embeddings", None),
+        processed_embeddings=int(getattr(p, "processed_embeddings", 0) or 0),
+        indexed_embeddings=int(getattr(p, "indexed_embeddings", 0) or 0),
+        failed_embeddings=int(getattr(p, "failed_embeddings", 0) or 0),
+        current_embedding=getattr(p, "current_embedding", None),
         percent=percent,
     )
 
@@ -1012,6 +1053,42 @@ class Query:
         return _settings_to_app_config(s)
 
     @strawberry.field
+    def semantic_search(
+        self,
+        info: strawberry.Info[ContextDict, None],
+        query: str,
+        limit: int = 10,
+        min_similarity: float | None = None,
+    ) -> list[SemanticSearchResultType]:
+        session = info.context["session"]
+        assert isinstance(session, Session)
+
+        s = info.context["settings"]
+        assert isinstance(s, AppSettings)
+
+        text = (query or "").strip()
+        if not text:
+            return []
+
+        matches = search_semantic_recordings(
+            catalog_root=s.catalog_root or "",
+            settings=s,
+            query=text,
+            limit=limit,
+            min_similarity=min_similarity,
+        )
+        return [
+            SemanticSearchResultType(
+                recording_id=int(item["recording_id"]),
+                score=float(item.get("score", 0.0) or 0.0),
+                rel_path=str(item.get("rel_path") or ""),
+                file_name=str(item.get("file_name") or ""),
+                title=str(item.get("title") or ""),
+            )
+            for item in matches
+        ]
+
+    @strawberry.field
     def ffmpeg_status(self, info: strawberry.Info[ContextDict, None]) -> FfmpegStatus:
         try:
             _, path = check_ffmpeg_installed()
@@ -1041,6 +1118,7 @@ class Query:
         min_short_side: int | None = None,
         max_short_side: int | None = None,
         video_codecs: list[str] | None = None,
+        recording_ids: list[int] | None = None,
         order_by: RecordingOrderBy | None = None,
         order_dir: SortDirection | None = None,
     ) -> RecordingConnection:
@@ -1059,6 +1137,11 @@ class Query:
             od = SortDirection.DESC if ob == RecordingOrderBy.RECORDED_AT else SortDirection.ASC
 
         stmt = select(Recording).outerjoin(Recording.streamer).outerjoin(Recording.site)
+        requested_ids = [int(recording_id) for recording_id in (recording_ids or []) if int(recording_id) > 0]
+        if recording_ids is not None:
+            if not requested_ids:
+                return RecordingConnection(total=0, total_size_bytes=0.0, items=[])
+            stmt = stmt.where(Recording.id.in_(requested_ids))
 
         if streamer_name:
             stmt = stmt.where(Streamer.name == streamer_name)
@@ -1112,13 +1195,20 @@ class Query:
             if cleaned:
                 stmt = stmt.where(Recording.video_codec.in_(cleaned))
 
+        # Semantic search provides an explicit relevance order that must not be
+        # replaced by the normal user-selected recording sort.
+        if requested_ids:
+            position = {recording_id: index for index, recording_id in enumerate(requested_ids)}
+            stmt = stmt.order_by(case(position, value=Recording.id), Recording.id.desc())
         # Order
         def _nullslast(col):
             if od == SortDirection.ASC:
                 return col.asc().nullslast()
             return col.desc().nullslast()
 
-        if ob == RecordingOrderBy.TITLE:
+        if requested_ids:
+            pass
+        elif ob == RecordingOrderBy.TITLE:
             stmt = stmt.order_by(_nullslast(func.lower(Recording.title)), Recording.id.desc())
         elif ob == RecordingOrderBy.STREAMER_NAME:
             # Put null streamers last, then order by name.
@@ -1605,18 +1695,22 @@ def _delete_recordings_impl(
         return SimpleResult(ok=False, message="Catalog root is not configured")
 
     deleted = 0
+    directories_to_prune: list[tuple[Path, Path]] = []
     for rid in ids:
         rec = session.get(Recording, rid)
         if not rec:
             continue
 
-        # Delete file (best-effort) then DB row.
         try:
             p = resolve_recording_path(s, rec.rel_path)
             if p is not None:
                 p.unlink(missing_ok=True)
-        except Exception:
-            pass
+                directories_to_prune.append((p.parent, _recording_storage_root(s, p)))
+        except OSError as exc:
+            session.rollback()
+            message = f"Could not delete recording '{_recording_log_name(rec)}': {exc}"
+            logger.exception(message)
+            return SimpleResult(ok=False, message=message)
 
         _cleanup_recording_artifacts(
             catalog_root=s.catalog_root,
@@ -1625,10 +1719,56 @@ def _delete_recordings_impl(
             file_hash=getattr(rec, "file_hash", None),
         )
 
+        session.execute(delete(RecordingTag).where(RecordingTag.recording_id == rec.id))
+        session.execute(delete(RecordingOverride).where(RecordingOverride.recording_id == rec.id))
         session.delete(rec)
         deleted += 1
 
+    for directory, storage_root in directories_to_prune:
+        try:
+            _remove_empty_recording_directories(directory, storage_root)
+        except OSError as exc:
+            session.rollback()
+            message = f"Could not remove empty recording folder '{directory}': {exc}"
+            logger.exception(message)
+            return SimpleResult(ok=False, message=message)
+
     return SimpleResult(ok=True, message=f"Deleted {deleted} recording(s)")
+
+
+def _recording_storage_root(settings: AppSettings, recording_path: Path) -> Path:
+    roots = [Path(folder.path) for folder in settings.catalog_folders if folder.path]
+    if settings.catalog_root:
+        roots.append(Path(settings.catalog_root))
+
+    resolved_path = recording_path.resolve(strict=False)
+    containing_roots: list[Path] = []
+    for root in roots:
+        resolved_root = root.resolve(strict=False)
+        try:
+            resolved_path.relative_to(resolved_root)
+        except ValueError:
+            continue
+        containing_roots.append(resolved_root)
+
+    if containing_roots:
+        return max(containing_roots, key=lambda root: len(root.parts))
+    return recording_path.parent
+
+
+def _remove_empty_recording_directories(directory: Path, storage_root: Path) -> None:
+    current = directory.resolve(strict=False)
+    root = storage_root.resolve(strict=False)
+    while current != root:
+        try:
+            current.rmdir()
+        except FileNotFoundError:
+            return
+        except OSError:
+            if current.exists() and not any(current.iterdir()):
+                raise
+            return
+        current = current.parent
 
 
 @strawberry.type
@@ -2455,6 +2595,7 @@ class Mutation:
             live_preview_segments=10,
             periodic_scan_enabled=DEFAULT_PERIODIC_SCAN_ENABLED,
             periodic_scan_interval_minutes=DEFAULT_PERIODIC_SCAN_INTERVAL_MINUTES,
+            semantic_search_min_similarity=DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY,
             backend_host=DEFAULT_BACKEND_HOST,
             backend_port=DEFAULT_BACKEND_PORT,
             auth_required=DEFAULT_AUTH_REQUIRED,
@@ -2645,6 +2786,33 @@ class Mutation:
         return _settings_to_app_config(new_settings)
 
     @strawberry.mutation
+    def set_ai_models_dir(self, info: strawberry.Info[ContextDict, None], ai_models_dir: str) -> AppConfig:
+        _ = info
+        s = load_settings()
+        value = _coerce_ai_models_dir(ai_models_dir)
+        new_settings = _clone_settings(s, ai_models_dir=value)
+        save_settings(new_settings)
+        logger.info("AI models directory updated path=%s", value)
+        return _settings_to_app_config(new_settings)
+
+    @strawberry.mutation
+    def set_semantic_search_min_similarity(
+        self, info: strawberry.Info[ContextDict, None], semantic_search_min_similarity: float
+    ) -> AppConfig:
+        _ = info
+        value = _coerce_semantic_search_min_similarity(
+            semantic_search_min_similarity,
+            default=DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY,
+        )
+        if value != float(semantic_search_min_similarity):
+            raise ValueError("semanticSearchMinSimilarity must be between 0 and 1")
+        s = load_settings()
+        new_settings = _clone_settings(s, semantic_search_min_similarity=value)
+        save_settings(new_settings)
+        logger.info("Semantic search similarity threshold updated threshold=%s", value)
+        return _settings_to_app_config(new_settings)
+
+    @strawberry.mutation
     async def scan_catalog(self, info: strawberry.Info[ContextDict, None]) -> ScanResultType:
         s = info.context["settings"]
         assert isinstance(s, AppSettings)
@@ -2664,6 +2832,14 @@ class Mutation:
                     session=session,
                 )
                 session.commit()
+                try:
+                    index_semantic_recordings(
+                        session=session,
+                        catalog_root=s.catalog_root or "",
+                        settings=s,
+                    )
+                except RuntimeError as exc:
+                    logger.warning("Semantic indexing skipped after direct scan error=%s", exc)
                 return result
             except Exception:
                 session.rollback()

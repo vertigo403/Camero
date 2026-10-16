@@ -33,6 +33,8 @@ DEFAULT_AUTO_TAG_AFTER_SCAN = False
 DEFAULT_AUTO_TAG_CONFIDENCE = 0.6
 DEFAULT_AUTO_TAG_SCENE_THRESHOLD = 0.35
 DEFAULT_AUTO_TAG_FRAME_INTERVAL = "auto"
+DEFAULT_AI_MODELS_DIR = "models"
+DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY = 0.15
 
 
 def _is_valid_filename_regex(pattern: str) -> bool:
@@ -52,6 +54,15 @@ class CatalogFolder:
     match_path: bool = False
 
 
+def _default_ai_models_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        try:
+            return Path(sys.executable).resolve().parent / DEFAULT_AI_MODELS_DIR
+        except Exception:
+            pass
+    return (Path(__file__).resolve().parents[2] / DEFAULT_AI_MODELS_DIR).resolve()
+
+
 @dataclass(frozen=True)
 class AppSettings:
     catalog_root: str | None = None
@@ -65,6 +76,8 @@ class AppSettings:
     auto_tag_confidence: float = DEFAULT_AUTO_TAG_CONFIDENCE
     auto_tag_scene_threshold: float = DEFAULT_AUTO_TAG_SCENE_THRESHOLD
     auto_tag_frame_interval: str = DEFAULT_AUTO_TAG_FRAME_INTERVAL
+    ai_models_dir: str | None = None
+    semantic_search_min_similarity: float = DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY
     backend_host: str = DEFAULT_BACKEND_HOST
     backend_port: int = DEFAULT_BACKEND_PORT
     auth_required: bool = DEFAULT_AUTH_REQUIRED
@@ -162,6 +175,26 @@ def _coerce_auto_tag_frame_interval(value: object, *, default: str = DEFAULT_AUT
         return str(round(f, 2))
     except Exception:
         return str(default)
+
+
+def _coerce_ai_models_dir(value: object, *, default: Path | str | None = None) -> str:
+    candidate = value if value is not None else default
+    if isinstance(candidate, Path):
+        return str(candidate)
+    if isinstance(candidate, str):
+        text = candidate.strip()
+        return text or str(_default_ai_models_dir())
+    return str(_default_ai_models_dir())
+
+
+def _coerce_semantic_search_min_similarity(value: object, *, default: float = DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY) -> float:
+    try:
+        f = float(value)  # type: ignore[arg-type]
+    except Exception:
+        return float(default)
+    if f < 0.0 or f > 1.0:
+        return float(default)
+    return round(f, 4)
 
 
 @dataclass(frozen=True)
@@ -359,6 +392,8 @@ def _build_global_settings_payload(
     auth_required: object = _MISSING,
     auth_username: object = _MISSING,
     auth_password: object = _MISSING,
+    ai_models_dir: object = _MISSING,
+    semantic_search_min_similarity: object = _MISSING,
 ) -> dict[str, Any]:
     current = _load_json_first_existing([_settings_path(), _user_settings_path()])
     if not isinstance(current, dict):
@@ -372,6 +407,11 @@ def _build_global_settings_payload(
         "auth_required": _coerce_auth_required(current.get("auth_required"), default=DEFAULT_AUTH_REQUIRED),
         "auth_username": _coerce_auth_credential(current.get("auth_username"), default=DEFAULT_AUTH_USERNAME),
         "auth_password": _coerce_auth_credential(current.get("auth_password"), default=DEFAULT_AUTH_PASSWORD),
+        "ai_models_dir": _coerce_ai_models_dir(current.get("ai_models_dir"), default=_default_ai_models_dir()),
+        "semantic_search_min_similarity": _coerce_semantic_search_min_similarity(
+            current.get("semantic_search_min_similarity"),
+            default=DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY,
+        ),
     }
 
     if active_catalog is not _MISSING:
@@ -386,6 +426,13 @@ def _build_global_settings_payload(
         payload["auth_username"] = _coerce_auth_credential(auth_username, default=DEFAULT_AUTH_USERNAME)
     if auth_password is not _MISSING:
         payload["auth_password"] = _coerce_auth_credential(auth_password, default=DEFAULT_AUTH_PASSWORD)
+    if ai_models_dir is not _MISSING:
+        payload["ai_models_dir"] = _coerce_ai_models_dir(ai_models_dir, default=_default_ai_models_dir())
+    if semantic_search_min_similarity is not _MISSING:
+        payload["semantic_search_min_similarity"] = _coerce_semantic_search_min_similarity(
+            semantic_search_min_similarity,
+            default=DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY,
+        )
 
     return payload
 
@@ -584,6 +631,11 @@ def load_settings() -> AppSettings:
     auth_required = _coerce_auth_required(data.get("auth_required"), default=DEFAULT_AUTH_REQUIRED)
     auth_username = _coerce_auth_credential(data.get("auth_username"), default=DEFAULT_AUTH_USERNAME)
     auth_password = _coerce_auth_credential(data.get("auth_password"), default=DEFAULT_AUTH_PASSWORD)
+    ai_models_dir = _coerce_ai_models_dir(data.get("ai_models_dir"), default=_default_ai_models_dir())
+    semantic_search_min_similarity = _coerce_semantic_search_min_similarity(
+        data.get("semantic_search_min_similarity"),
+        default=DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY,
+    )
 
     # New schema (v2): app settings only contain a stable reference to active catalog.
     if "active_catalog" in data:
@@ -599,6 +651,8 @@ def load_settings() -> AppSettings:
         catalog_root = _resolve_catalog_ref(ref)
         if not catalog_root:
             return AppSettings(
+                ai_models_dir=ai_models_dir,
+                semantic_search_min_similarity=semantic_search_min_similarity,
                 backend_host=backend_host,
                 backend_port=backend_port,
                 auth_required=auth_required,
@@ -610,6 +664,8 @@ def load_settings() -> AppSettings:
             root = Path(catalog_root)
             if not root.exists() or not root.is_dir():
                 return AppSettings(
+                    ai_models_dir=ai_models_dir,
+                    semantic_search_min_similarity=semantic_search_min_similarity,
                     backend_host=backend_host,
                     backend_port=backend_port,
                     auth_required=auth_required,
@@ -618,6 +674,8 @@ def load_settings() -> AppSettings:
                 )
         except Exception:
             return AppSettings(
+                ai_models_dir=ai_models_dir,
+                semantic_search_min_similarity=semantic_search_min_similarity,
                 backend_host=backend_host,
                 backend_port=backend_port,
                 auth_required=auth_required,
@@ -682,6 +740,8 @@ def load_settings() -> AppSettings:
             auto_tag_confidence=auto_tag_confidence,
             auto_tag_scene_threshold=auto_tag_scene_threshold,
             auto_tag_frame_interval=auto_tag_frame_interval,
+            ai_models_dir=ai_models_dir,
+            semantic_search_min_similarity=semantic_search_min_similarity,
             backend_host=backend_host,
             backend_port=backend_port,
             auth_required=auth_required,
@@ -800,6 +860,8 @@ def load_settings() -> AppSettings:
         live_preview_segments=legacy_live_preview_segments_i,
         periodic_scan_enabled=legacy_periodic_scan_enabled,
         periodic_scan_interval_minutes=legacy_periodic_scan_interval_minutes_i,
+        ai_models_dir=ai_models_dir,
+        semantic_search_min_similarity=semantic_search_min_similarity,
         backend_host=backend_host,
         backend_port=backend_port,
         auth_required=auth_required,
@@ -820,6 +882,8 @@ def save_settings(settings: AppSettings) -> None:
             auth_required=getattr(settings, "auth_required", DEFAULT_AUTH_REQUIRED),
             auth_username=getattr(settings, "auth_username", DEFAULT_AUTH_USERNAME),
             auth_password=getattr(settings, "auth_password", DEFAULT_AUTH_PASSWORD),
+            ai_models_dir=getattr(settings, "ai_models_dir", _default_ai_models_dir()),
+            semantic_search_min_similarity=getattr(settings, "semantic_search_min_similarity", DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY),
         )
         _write_json_with_fallback(payload)
         return
@@ -830,6 +894,8 @@ def save_settings(settings: AppSettings) -> None:
         auth_required=getattr(settings, "auth_required", DEFAULT_AUTH_REQUIRED),
         auth_username=getattr(settings, "auth_username", DEFAULT_AUTH_USERNAME),
         auth_password=getattr(settings, "auth_password", DEFAULT_AUTH_PASSWORD),
+        ai_models_dir=getattr(settings, "ai_models_dir", _default_ai_models_dir()),
+        semantic_search_min_similarity=getattr(settings, "semantic_search_min_similarity", DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY),
     )
     _write_json_with_fallback(payload)
 
@@ -878,6 +944,14 @@ def save_settings(settings: AppSettings) -> None:
         "auto_tag_frame_interval": _coerce_auto_tag_frame_interval(
             getattr(settings, "auto_tag_frame_interval", DEFAULT_AUTO_TAG_FRAME_INTERVAL),
             default=DEFAULT_AUTO_TAG_FRAME_INTERVAL,
+        ),
+        "ai_models_dir": _coerce_ai_models_dir(
+            getattr(settings, "ai_models_dir", _default_ai_models_dir()),
+            default=_default_ai_models_dir(),
+        ),
+        "semantic_search_min_similarity": _coerce_semantic_search_min_similarity(
+            getattr(settings, "semantic_search_min_similarity", DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY),
+            default=DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY,
         ),
     }
 

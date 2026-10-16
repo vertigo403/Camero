@@ -17,6 +17,7 @@ dependencies = [
     "pandas>=2.2",
     "hachoir>=3.3.0",
     "opencv-python>=4.10",
+    "mediapipe>=0.10.31",
     "onnxruntime-directml>=1.24.4; platform_system == 'Windows'",
     "onnxruntime>=1.24.0; platform_system != 'Windows'",
 ]
@@ -28,4 +29,3 @@ camero = "camero.main:main"
 dev = [
   
 ]
-

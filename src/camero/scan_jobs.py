@@ -23,6 +23,7 @@ from .preview_jobs import (
 )
 from .catalog_paths import resolve_recording_path
 from .logging_utils import get_logger
+from .semantic_search import index_semantic_recordings
 from .autotag_jobs import (
     auto_tag_recording_with_session,
     _get_tagger,
@@ -218,6 +219,42 @@ def start_scan_job(settings: AppSettings) -> ScanJob:
 
             # Ensure discovered recordings are visible before any long-running second phase.
             session.commit()
+
+            def _semantic_index_progress(
+                total: int,
+                processed: int,
+                indexed: int,
+                failed: int,
+                current: str | None,
+            ) -> None:
+                _update_progress(
+                    ScanProgress(
+                        phase="semantic_index",
+                        total_files=last_progress.total_files,
+                        scanned_files=last_progress.scanned_files,
+                        added=last_progress.added,
+                        updated=last_progress.updated,
+                        skipped=last_progress.skipped,
+                        errors=last_progress.errors,
+                        total_embeddings=total,
+                        processed_embeddings=processed,
+                        indexed_embeddings=indexed,
+                        failed_embeddings=failed,
+                        current_embedding=current,
+                    )
+                )
+
+            try:
+                index_semantic_recordings(
+                    session=session,
+                    catalog_root=settings.catalog_root or "",
+                    settings=settings,
+                    progress_cb=_semantic_index_progress,
+                    cancel_cb=_scan_cancelled,
+                )
+            except RuntimeError as exc:
+                logger.warning("Semantic indexing skipped job=%s error=%s", job_id, exc)
+                _semantic_index_progress(0, 0, 0, 1, None)
 
             # Optional: generate animated previews as a second phase.
             def _previews_cancelled() -> bool:
