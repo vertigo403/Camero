@@ -6,7 +6,7 @@ REM Output: dist\Camero.exe
 
 cd /d "%~dp0"
 
-VENV_DIR=.venv_uem_python313
+VENV_DIR=.venv
 
 set "PYTHON_EXE=py"
 if exist "%VENV_DIR%\Scripts\python.exe" (

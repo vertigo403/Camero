@@ -85,12 +85,8 @@ This directory is shared by **Auto-tagging** and **AI Magic Search**. Place
 `model.onnx` and `selected_tags.csv` in it for auto-tagging; changing the directory
 also switches the auto-tagging model on the next run. The minimum similarity
 threshold, under **AI Magic Search**, applies only to semantic search.
-EmbeddingGemma V2 is downloaded to that directory during catalog scanning. Search
+Embeddings model is downloaded to that directory during catalog scanning. Search
 only retrieves from the completed local index, so it never waits for video
 indexing or model downloads. Later scans only reindex recordings whose media
 fingerprint or indexed metadata changed.
 
-The semantic engine logs only errors. Native INFO and WARNING messages (including
-image resizing and optional model-section diagnostics) are suppressed to keep
-indexing quiet. This does not change Camero's application logging or image
-preprocessing.
