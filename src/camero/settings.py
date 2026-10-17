@@ -13,10 +13,11 @@ from .volume_ids import find_mount_point_for_volume_id, iter_mount_points, split
 
 
 DEFAULT_FILENAME_REGEX = (
-    # Default format: <streamer>_<site>_<YYYYMMDD>_<time>.<ext>
-    # Streamer names may contain underscores, so streamer is greedy and we
-    # anchor parsing with the date/time suffix.
-    r"^(?P<streamer>[^/\\]+)_(?P<site>[^_/\\]+)_(?P<date>\d{8})_(?P<time>[^.]+)\.(?P<ext>[^.]+)$"
+    # Compact dates include a site; dashed dates omit it. Anchor the optional
+    # site to the compact date so underscores in streamer names stay intact.
+    r"^(?P<streamer>[^/\\]+?)_(?:(?P<site>[^_/\\]+)_(?=\d{8}_))?"
+    r"(?P<date>\d{8}|\d{4}-\d{2}-\d{2})_"
+    r"(?P<time>\d{6}|\d{2}-\d{2}-\d{2}).*?\.(?P<ext>[^.]+)$"
 )
 
 
@@ -61,6 +62,12 @@ def _default_ai_models_dir() -> Path:
         except Exception:
             pass
     return (Path(__file__).resolve().parents[2] / DEFAULT_AI_MODELS_DIR).resolve()
+
+
+def resolve_ai_models_dir(value: str | Path | None = None) -> Path:
+    if value is None or not str(value).strip():
+        return _default_ai_models_dir().resolve()
+    return Path(value).expanduser().resolve()
 
 
 @dataclass(frozen=True)

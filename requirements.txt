@@ -38,8 +38,6 @@ pillow==12.1.0
 pydantic==2.12.5
 pydantic_core==2.41.5
 Pygments==2.19.2
-#pyinstaller @ file:///C:/Users/Enrique/Documents/pyinstaller
-#pyinstaller-hooks-contrib==2025.11
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
 python-multipart==0.0.21

@@ -14,6 +14,7 @@ from .app import create_app
 from .logging_utils import configure_app_logging
 from .settings import DEFAULT_BACKEND_HOST, DEFAULT_BACKEND_PORT, load_settings
 
+CAMERO_VERSION = "2.0.0"  # Example version, replace with actual version if needed
 
 # Windows: enforce selector loop policy as early as possible.
 # This avoids noisy ConnectionResetError tracebacks when clients cancel Range requests.

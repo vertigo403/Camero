@@ -11,6 +11,12 @@ Camero is a local catalog manager for recorded stream sessions.
   - recording date
 - Browse recordings (paginated cards), sites, tags and configuration
 - Search recordings semantically from the Recordings view using text descriptions
+- Find similar videos with the search icon on recording cards in Recordings,
+  streamer, site and tag views. Searches cover the entire catalog and open in
+  Recordings. The icon is enabled only
+  for semantically indexed videos and compares their stored embeddings directly,
+  excluding the source video. Results use the AI Magic Search similarity threshold
+  and are ordered by relevance; Clear returns to the normal recording list.
 - UI uses GraphQL queries against the backend
 
 ## Run
@@ -75,7 +81,16 @@ model/streamer name, and site name as metadata.
 Configure the model directory and the minimum similarity threshold in
 **Settings → AI**. By default, the model directory is `models` next to the
 frozen executable (or the repository's `models` directory during development).
+This directory is shared by **Auto-tagging** and **AI Magic Search**. Place
+`model.onnx` and `selected_tags.csv` in it for auto-tagging; changing the directory
+also switches the auto-tagging model on the next run. The minimum similarity
+threshold, under **AI Magic Search**, applies only to semantic search.
 EmbeddingGemma V2 is downloaded to that directory during catalog scanning. Search
 only retrieves from the completed local index, so it never waits for video
 indexing or model downloads. Later scans only reindex recordings whose media
 fingerprint or indexed metadata changed.
+
+The semantic engine logs only errors. Native INFO and WARNING messages (including
+image resizing and optional model-section diagnostics) are suppressed to keep
+indexing quiet. This does not change Camero's application logging or image
+preprocessing.

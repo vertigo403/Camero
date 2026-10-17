@@ -6,9 +6,11 @@ REM Output: dist\Camero.exe
 
 cd /d "%~dp0"
 
+VENV_DIR=.venv_uem_python313
+
 set "PYTHON_EXE=py"
-if exist ".venv_uem_python313\Scripts\python.exe" (
-  set "PYTHON_EXE=.venv_uem_python313\Scripts\python.exe"
+if exist "%VENV_DIR%\Scripts\python.exe" (
+  set "PYTHON_EXE=%VENV_DIR%\Scripts\python.exe"
 )
 
 if not exist "src\assets\icon.ico" (

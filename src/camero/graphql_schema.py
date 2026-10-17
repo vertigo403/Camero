@@ -93,7 +93,12 @@ from .catalog_paths import (
 )
 from .media import check_ffmpeg_installed, ensure_thumbnail, extract_frame_at_time, find_contact_sheet_path, probe_media, quick_file_hash
 from .logging_utils import get_logger
-from .semantic_search import index_semantic_recordings, search_semantic_recordings
+from .semantic_search import (
+    index_semantic_recordings,
+    search_semantic_recordings,
+    search_similar_recordings,
+    semantic_recording_is_indexed,
+)
 
 
 ContextDict = dict[str, object]
@@ -389,6 +394,7 @@ class RecordingType:
     thumbnail_url: str | None
     live_preview_url: str | None
     contact_sheet_url: str | None
+    semantic_indexed: bool = False
 
 
 @strawberry.type
@@ -999,6 +1005,7 @@ def _recording_to_type(recording: Recording, *, settings: AppSettings | None) ->
         thumbnail_url=thumb_url,
         live_preview_url=live_preview_url,
         contact_sheet_url=contact_sheet_url,
+        semantic_indexed=semantic_recording_is_indexed(catalog_root, recording.id) if catalog_root else False,
     )
 
 
@@ -1056,9 +1063,10 @@ class Query:
     def semantic_search(
         self,
         info: strawberry.Info[ContextDict, None],
-        query: str,
+        query: str = "",
         limit: int = 10,
         min_similarity: float | None = None,
+        recording_id: int | None = None,
     ) -> list[SemanticSearchResultType]:
         session = info.context["session"]
         assert isinstance(session, Session)
@@ -1067,10 +1075,20 @@ class Query:
         assert isinstance(s, AppSettings)
 
         text = (query or "").strip()
-        if not text:
+        if recording_id is not None and text:
+            raise ValueError("Provide either query or recordingId, not both.")
+        if recording_id is not None and session.get(Recording, recording_id) is None:
+            raise ValueError("Recording not found.")
+        if not text and recording_id is None:
             return []
 
-        matches = search_semantic_recordings(
+        matches = search_similar_recordings(
+            catalog_root=s.catalog_root or "",
+            settings=s,
+            recording_id=recording_id,
+            limit=limit,
+            min_similarity=min_similarity,
+        ) if recording_id is not None else search_semantic_recordings(
             catalog_root=s.catalog_root or "",
             settings=s,
             query=text,

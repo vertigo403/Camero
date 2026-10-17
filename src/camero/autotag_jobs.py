@@ -7,7 +7,6 @@ overwhelming the ONNX runtime and ffmpeg.
 """
 from __future__ import annotations
 
-import sys
 import threading
 import time
 import uuid
@@ -21,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from .db import get_session_for_catalog
 from .models import Recording, Tag
-from .settings import AppSettings, DEFAULT_AUTO_TAG_CONFIDENCE, DEFAULT_AUTO_TAG_FRAME_INTERVAL, DEFAULT_AUTO_TAG_SCENE_THRESHOLD
+from .settings import AppSettings, DEFAULT_AUTO_TAG_CONFIDENCE, DEFAULT_AUTO_TAG_FRAME_INTERVAL, DEFAULT_AUTO_TAG_SCENE_THRESHOLD, resolve_ai_models_dir
 from .catalog_paths import resolve_recording_path
 from .logging_utils import get_logger
 
@@ -145,23 +144,13 @@ def cancel_auto_tag(job_id: str) -> bool:
 # Core tagging logic (reusable from scan_jobs)
 # ---------------------------------------------------------------------------
 
-def _resolve_tagger_resource_paths() -> tuple[Path, Path]:
-    # Resolve model paths regardless of cwd.
-    # In dev: project root / models / ...
-    # In PyInstaller: executable directory / models / ...
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
-    else:
-        # Walk up from this file to find the project root containing /models/.
-        here = Path(__file__).resolve()
-        # src/camero/autotag_jobs.py → project root is 2 levels up
-        base = here.parent.parent.parent
-
-    return base / "models" / "model.onnx", base / "models" / "selected_tags.csv"
+def _resolve_tagger_resource_paths(settings: AppSettings) -> tuple[Path, Path]:
+    model_dir = resolve_ai_models_dir(settings.ai_models_dir)
+    return model_dir / "model.onnx", model_dir / "selected_tags.csv"
 
 
 def _tagger_signature(settings: AppSettings) -> tuple[str, str, float]:
-    model_path, csv_path = _resolve_tagger_resource_paths()
+    model_path, csv_path = _resolve_tagger_resource_paths(settings)
     confidence = float(
         getattr(settings, "auto_tag_confidence", DEFAULT_AUTO_TAG_CONFIDENCE)
         or DEFAULT_AUTO_TAG_CONFIDENCE
@@ -171,7 +160,10 @@ def _tagger_signature(settings: AppSettings) -> tuple[str, str, float]:
 
 def _create_tagger(settings: AppSettings) -> object:
     """Instantiate NSFWAutoTagger from the external model files shipped with the app."""
-    model_path, csv_path = _resolve_tagger_resource_paths()
+    model_path, csv_path = _resolve_tagger_resource_paths(settings)
+    for resource in (model_path, csv_path):
+        if not resource.is_file():
+            raise FileNotFoundError(f"Auto-tagging resource not found in AI models directory: {resource}")
 
     # Import here to avoid making onnxruntime a hard dependency at import time.
     from autotagger.autotagger import NSFWAutoTagger  # type: ignore[import]

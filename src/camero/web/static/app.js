@@ -38,52 +38,6 @@ function createDefaultRecordingsFilter() {
   };
 }
 
-function getStoredRecordingsFilter() {
-  try {
-    const raw = localStorage.getItem('camero.recordingsFilter');
-    const base = createDefaultRecordingsFilter();
-    if (!raw) return base;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return base;
-    return {
-      nameContains: String(parsed.nameContains || '').trim(),
-      negateNameContains: !!(parsed.negateNameContains ?? parsed.negateFilters),
-      nameContainsRegex: !!parsed.nameContainsRegex,
-      minSizeBytes: Number.isFinite(parsed.minSizeBytes) ? Number(parsed.minSizeBytes) : null,
-      maxSizeBytes: Number.isFinite(parsed.maxSizeBytes) ? Number(parsed.maxSizeBytes) : null,
-      minDurationSeconds: Number.isFinite(parsed.minDurationSeconds) ? Number(parsed.minDurationSeconds) : null,
-      maxDurationSeconds: Number.isFinite(parsed.maxDurationSeconds) ? Number(parsed.maxDurationSeconds) : null,
-      minShortSide: Number.isInteger(parsed.minShortSide) ? Number(parsed.minShortSide) : null,
-      maxShortSide: Number.isInteger(parsed.maxShortSide) ? Number(parsed.maxShortSide) : null,
-      videoCodecs: Array.isArray(parsed.videoCodecs)
-        ? parsed.videoCodecs.map(v => String(v || '').trim()).filter(Boolean)
-        : [],
-      missingLivePreview: !!parsed.missingLivePreview,
-    };
-  } catch {
-    return createDefaultRecordingsFilter();
-  }
-}
-
-function setStoredRecordingsFilter(value) {
-  try {
-    const next = {
-      ...createDefaultRecordingsFilter(),
-      ...(value || {}),
-      nameContains: String(value?.nameContains || '').trim(),
-      negateNameContains: !!value?.negateNameContains,
-      nameContainsRegex: !!value?.nameContainsRegex,
-      videoCodecs: Array.isArray(value?.videoCodecs)
-        ? value.videoCodecs.map(v => String(v || '').trim()).filter(Boolean)
-        : [],
-      missingLivePreview: !!value?.missingLivePreview,
-    };
-    localStorage.setItem('camero.recordingsFilter', JSON.stringify(next));
-  } catch {
-    /* ignore */
-  }
-}
-
 function getPreferredTheme() {
   const stored = localStorage.getItem('camero.theme');
   if (stored === 'light' || stored === 'dark') return stored;
@@ -116,7 +70,7 @@ const state = {
     by: 'RECORDED_AT',
     dir: 'DESC',
   },
-  recordingsFilter: getStoredRecordingsFilter(),
+  recordingsFilter: createDefaultRecordingsFilter(),
   semanticSearch: {
     query: '',
     recordingIds: null,
@@ -2302,14 +2256,27 @@ function route() {
   return { name, arg };
 }
 
+let renderedRouteKey = null;
+let pendingSimilarSearch = null;
+
 async function render() {
   const r = route();
+  const similarSource = pendingSimilarSearch;
+  pendingSimilarSearch = null;
+  const routeKey = JSON.stringify(r);
+  if (renderedRouteKey !== routeKey) {
+    state.recordingsFilter = createDefaultRecordingsFilter();
+    state.semanticSearch = { query: '', recordingIds: null };
+    state.search = '';
+    state.offset = 0;
+    renderedRouteKey = routeKey;
+  }
   setActiveNav(r.name);
   setSettingsBusy(!!state.scan.jobId);
   state.selected.clear();
   state.scan.refreshList = null;
 
-  if (r.name === 'recordings') return renderRecordings();
+  if (r.name === 'recordings') return renderRecordings({ similarSource });
   if (r.name === 'streamers') return renderStreamers(r.arg);
   if (r.name === 'sites') return renderSites();
   if (r.name === 'tags') return renderTags();
@@ -2322,7 +2289,7 @@ async function render() {
 }
 
 async function renderSettings() {
-  const DEFAULT_FILENAME_TEMPLATE = '{streamer}_{site}_{YYYYMMDD}_{HHMMSS}{wildcard}.{ext}';
+  const DEFAULT_FILENAME_TEMPLATE = '{streamer}_{site?}{YYYYMMDD|YYYY-MM-DD}_{HHMMSS|HH-mm-ss}{wildcard}.{ext}';
   const data = await gql(`query { appConfig { catalogRoot filenameRegex catalogFolders { key path filenameRegex filenameTemplate matchPath } generateLivePreviews livePreviewSegments periodicScanEnabled periodicScanIntervalMinutes autoTagAfterScan autoTagConfidence autoTagSceneThreshold autoTagFrameInterval aiModelsDir semanticSearchMinSimilarity backendHost backendPort authRequired authUsername authPassword } }`);
   const cfg = data.appConfig;
 
@@ -2450,6 +2417,39 @@ async function renderSettings() {
             </div>
 
             <div class="panel settings-section-panel">
+              <div class="subtle">Automatic catalog scan</div>
+
+              <label class="checkbox" style="margin-top:10px">
+                <input id="periodicScanEnabled" type="checkbox" ${cfg.periodicScanEnabled ? 'checked' : ''} />
+                Scan the catalog automatically on a schedule
+              </label>
+
+              <div style="display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; margin-top:12px">
+                <label style="display:flex; flex-direction:column; gap:6px; min-width:180px">
+                  <div class="subtle">Minutes between scans</div>
+                  <input id="periodicScanIntervalMinutes" class="input" type="number" min="1" max="1440" step="1" value="${escapeHtml(String(cfg.periodicScanIntervalMinutes || 30))}" />
+                </label>
+              </div>
+              <div class="subtle" style="margin-top:8px">When enabled, Camero starts a new scan only if there is no other scan already running.</div>
+            </div>
+          </section>
+
+          <section id="settingsPanelAi" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabAi" data-settings-panel="ai" hidden>
+            <div class="settings-panel-summary">
+              <div class="settings-panel-eyebrow">AI</div>
+              <div class="settings-panel-title">Auto-tagging and semantic video search</div>
+              <div class="settings-panel-copy">Configure automatic AI tags and search recordings by the visual content of their contact sheets. Missing contact sheets are generated from up to 30 key frames.</div>
+            </div>
+
+            <div class="panel settings-section-panel">
+              <div class="subtle" style="margin-bottom:10px">AI Magic Search</div>
+              <label style="display:flex; flex-direction:column; gap:6px; max-width:340px">
+                <div class="subtle">Minimum similarity (0 to 1)</div>
+                <input id="semanticSearchMinSimilarity" class="input" type="number" min="0" max="1" step="0.01" value="${escapeHtml(String(cfg.semanticSearchMinSimilarity ?? 0.15))}" />
+              </label>
+            </div>
+
+            <div class="panel settings-section-panel">
               <div class="subtle">Auto-tagging</div>
 
               <label class="checkbox" style="margin-top:10px">
@@ -2477,45 +2477,13 @@ async function renderSettings() {
             </div>
 
             <div class="panel settings-section-panel">
-              <div class="subtle">Automatic catalog scan</div>
-
-              <label class="checkbox" style="margin-top:10px">
-                <input id="periodicScanEnabled" type="checkbox" ${cfg.periodicScanEnabled ? 'checked' : ''} />
-                Scan the catalog automatically on a schedule
-              </label>
-
-              <div style="display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; margin-top:12px">
-                <label style="display:flex; flex-direction:column; gap:6px; min-width:180px">
-                  <div class="subtle">Minutes between scans</div>
-                  <input id="periodicScanIntervalMinutes" class="input" type="number" min="1" max="1440" step="1" value="${escapeHtml(String(cfg.periodicScanIntervalMinutes || 30))}" />
-                </label>
-              </div>
-              <div class="subtle" style="margin-top:8px">When enabled, Camero starts a new scan only if there is no other scan already running.</div>
-            </div>
-          </section>
-
-          <section id="settingsPanelAi" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabAi" data-settings-panel="ai" hidden>
-            <div class="settings-panel-summary">
-              <div class="settings-panel-eyebrow">AI</div>
-              <div class="settings-panel-title">Semantic video search</div>
-              <div class="settings-panel-copy">Search recordings by the visual content of their contact sheets. Missing contact sheets are generated from up to 30 key frames.</div>
-            </div>
-
-            <div class="panel settings-section-panel">
               <label style="display:flex; flex-direction:column; gap:6px">
                 <div class="subtle">AI models directory</div>
                 <input id="aiModelsDir" class="input" value="${escapeHtml(cfg.aiModelsDir || '')}" placeholder="models" />
               </label>
-              <div class="subtle" style="margin-top:8px">EmbeddingGemma V2 is downloaded here automatically when a semantic search first needs it.</div>
+              <div class="subtle" style="margin-top:8px">Shared by Auto-tagging and AI Magic Search. Place the auto-tagging model.onnx and selected_tags.csv here. Embeddings model is downloaded here automatically during catalog scanning.</div>
             </div>
 
-            <div class="panel settings-section-panel">
-              <label style="display:flex; flex-direction:column; gap:6px; max-width:340px">
-                <div class="subtle">Minimum similarity (0 to 1)</div>
-                <input id="semanticSearchMinSimilarity" class="input" type="number" min="0" max="1" step="0.01" value="${escapeHtml(String(cfg.semanticSearchMinSimilarity ?? 0.15))}" />
-              </label>
-              <div class="subtle" style="margin-top:8px">Only videos whose contact sheet meets this similarity threshold are shown.</div>
-            </div>
           </section>
 
           <section id="settingsPanelNetwork" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabNetwork" data-settings-panel="network" hidden>
@@ -2853,6 +2821,21 @@ async function renderSettings() {
 
       if (token === 'streamer') {
         const r = addGroup('streamer', '(?P<streamer>[^/\\\\]+?)');
+        if (!r.ok) return r;
+        continue;
+      }
+      if (token === 'site?') {
+        const r = addGroup('site', '(?:(?P<site>[^_/\\\\]+)_(?=\\d{8}_))?');
+        if (!r.ok) return r;
+        continue;
+      }
+      if (token === 'YYYYMMDD|YYYY-MM-DD') {
+        const r = addGroup('date', '(?P<date>\\d{8}|\\d{4}-\\d{2}-\\d{2})');
+        if (!r.ok) return r;
+        continue;
+      }
+      if (token === 'HHMMSS|HH-mm-ss') {
+        const r = addGroup('time', '(?P<time>\\d{6}|\\d{2}-\\d{2}-\\d{2})');
         if (!r.ok) return r;
         continue;
       }
@@ -3566,24 +3549,31 @@ async function renderRecordings(options = {}) {
         </select>
       </label>
       <button id="${idPrefix}-selectAll" class="btn" title="Select all recordings matching current filters">Select all</button>
-      <span class="subtle" id="${idPrefix}-selCount">0 selected</span>
-      <button id="${idPrefix}-clearSelection" class="btn" title="Clear selection" hidden>Clear</button>
       <span style="flex:1"></span>
       ${hasCatalog ? `
         <button id="scan" class="btn btn-primary btn-scan">Scan catalog</button>
-        <button id="generateMissingLivePreviews" class="btn" hidden>Generate animated previews</button>
+        <button id="generateMissingLivePreviews" class="btn" hidden>Generate previews</button>
         <button id="stopScan" class="btn btn-danger" hidden>Stop scan</button>
         <button id="stopLivePreviews" class="btn btn-danger" hidden>Stop generation of animated previews</button>
-        <button id="autoTagUntagged" class="btn" hidden>Auto-tag untagged</button>
+        <button id="autoTagUntagged" class="btn" title="Auto-tag untagged recordings" hidden>AI tags</button>
         <button id="stopAutoTag" class="btn btn-danger" hidden>Stop auto-tagging</button>
       ` : ''}
       <button id="${idPrefix}-autoPreview" class="toggle-round ${state.recordingsAutoPreview ? 'active' : ''}" title="Animated previews: ${state.recordingsAutoPreview ? 'ON' : 'OFF'}" aria-label="Toggle animated previews" type="button">🎞️</button>
-      <button id="${idPrefix}-filtersBtn" class="toggle-round" title="Filters" aria-label="Filters" type="button">
+      <button id="${idPrefix}-filtersBtn" class="toggle-round recordings-filters" title="Filters" aria-label="Filters" type="button">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <path d="M3 5h18l-7 8v5l-4 2v-7L3 5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
         </svg>
       </button>
-      ${hasCatalog && isSemanticSearchView ? `<button id="${idPrefix}-semanticSearchBtn" class="btn" type="button" aria-expanded="false">Semantic search</button>` : ''}
+      ${hasCatalog && isSemanticSearchView ? `<button id="${idPrefix}-semanticSearchBtn" class="btn btn-magic-search" type="button" aria-expanded="false">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3ZM20 2v4m-2-2h4" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+        </svg>
+        AI Magic Search
+      </button>` : ''}
+      <div class="recordings-selection">
+        <span class="subtle" id="${idPrefix}-selCount" aria-live="polite">0 selected</span>
+        <button id="${idPrefix}-clearSelection" class="btn" title="Clear selection" hidden>Clear</button>
+      </div>
     </div>
 
     ${hasCatalog ? `
@@ -3591,7 +3581,7 @@ async function renderRecordings(options = {}) {
         <div id="${idPrefix}-semanticSearchPanel" class="semantic-search-panel" hidden>
           <label class="semantic-search-label" for="${idPrefix}-semanticSearchInput">Describe what you want to find</label>
           <div class="semantic-search-controls">
-            <input id="${idPrefix}-semanticSearchInput" class="input" type="search" placeholder="e.g. person outdoors at night" value="${escapeHtml(state.semanticSearch.query || '')}" />
+            <input id="${idPrefix}-semanticSearchInput" class="input" type="search" placeholder="e.g. busty blonde on bed" value="${escapeHtml(state.semanticSearch.query || '')}" />
             <button id="${idPrefix}-semanticSearchSubmit" class="btn btn-primary" type="button">OK</button>
             <button id="${idPrefix}-semanticSearchClear" class="btn" type="button" ${state.semanticSearch.recordingIds === null ? 'hidden' : ''}>Clear</button>
           </div>
@@ -3691,42 +3681,54 @@ async function renderRecordings(options = {}) {
     if (semanticSearchStatus) semanticSearchStatus.textContent = message || '';
   }
 
-  async function runSemanticSearch() {
-    const query = String(semanticSearchInput?.value || '').trim();
-    if (!query) {
+  let semanticSearchRequest = 0;
+
+  async function runSemanticSearch(recordingId = null, sourceTitle = '') {
+    const searchSession = state.semanticSearch;
+    const query = recordingId === null ? String(semanticSearchInput?.value || '').trim() : '';
+    if (!query && recordingId === null) {
       setSemanticSearchStatus('Enter a description to search.');
       semanticSearchInput?.focus();
       return;
     }
+    const request = ++semanticSearchRequest;
     if (semanticSearchSubmit) {
       semanticSearchSubmit.disabled = true;
       semanticSearchSubmit.textContent = 'Searching…';
     }
-    setSemanticSearchStatus('Indexing contact sheets and searching…');
+    if (semanticSearchPanel) semanticSearchPanel.hidden = false;
+    semanticSearchBtn?.setAttribute('aria-expanded', 'true');
+    setSemanticSearchStatus(recordingId === null ? 'Searching…' : `Finding videos similar to "${sourceTitle}"…`);
     try {
       const data = await gql(
-        `query($query:String!, $threshold:Float!) {
-          semanticSearch(query:$query, limit:100, minSimilarity:$threshold) {
+        `query($query:String!, $recordingId:Int, $threshold:Float!) {
+          semanticSearch(query:$query, recordingId:$recordingId, limit:100, minSimilarity:$threshold) {
             recordingId
             score
           }
         }`,
-        { query, threshold: Number(config.semanticSearchMinSimilarity ?? 0.15) }
+        { query, recordingId, threshold: Number(config.semanticSearchMinSimilarity ?? 0.15) }
       );
+      if (request !== semanticSearchRequest || state.semanticSearch !== searchSession || !semanticSearchPanel.isConnected) return;
       const matches = Array.isArray(data?.semanticSearch) ? data.semanticSearch : [];
       state.semanticSearch.query = query;
+      if (semanticSearchInput) semanticSearchInput.value = query;
       state.semanticSearch.recordingIds = matches
         .map(match => Number(match?.recordingId))
         .filter(recordingId => Number.isInteger(recordingId) && recordingId > 0);
       state.offset = 0;
       if (semanticSearchClear) semanticSearchClear.hidden = false;
-      setSemanticSearchStatus(`${state.semanticSearch.recordingIds.length} relevant video${state.semanticSearch.recordingIds.length === 1 ? '' : 's'} found.`);
+      setSemanticSearchStatus(`${state.semanticSearch.recordingIds.length} relevant video${state.semanticSearch.recordingIds.length === 1 ? '' : 's'} found.${recordingId === null ? '' : ` Similar to "${sourceTitle}".`}`);
       await load();
+      if (recordingId !== null && request === semanticSearchRequest && state.semanticSearch === searchSession && semanticSearchPanel.isConnected) {
+        window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+      }
     } catch (err) {
+      if (request !== semanticSearchRequest || state.semanticSearch !== searchSession || !semanticSearchPanel.isConnected) return;
       setSemanticSearchStatus('');
       showToast(err.message || String(err));
     } finally {
-      if (semanticSearchSubmit) {
+      if (request === semanticSearchRequest && semanticSearchSubmit) {
         semanticSearchSubmit.disabled = false;
         semanticSearchSubmit.textContent = 'OK';
       }
@@ -3740,7 +3742,7 @@ async function renderRecordings(options = {}) {
       if (!semanticSearchPanel.hidden) semanticSearchInput?.focus();
     };
   }
-  if (semanticSearchSubmit) semanticSearchSubmit.onclick = runSemanticSearch;
+  if (semanticSearchSubmit) semanticSearchSubmit.onclick = () => runSemanticSearch();
   if (semanticSearchInput) {
     semanticSearchInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
@@ -3751,8 +3753,8 @@ async function renderRecordings(options = {}) {
   }
   if (semanticSearchClear) {
     semanticSearchClear.onclick = async () => {
-      state.semanticSearch.query = '';
-      state.semanticSearch.recordingIds = null;
+      semanticSearchRequest++;
+      state.semanticSearch = { query: '', recordingIds: null };
       state.offset = 0;
       semanticSearchInput.value = '';
       semanticSearchClear.hidden = true;
@@ -3814,9 +3816,14 @@ async function renderRecordings(options = {}) {
     return hasNameContains || hasNums || hasCodecs || hasPreviewFilter;
   }
 
-  if (filtersBtn) {
-    filtersBtn.classList.toggle('active', hasActiveAdvancedFilters());
+  function updateFiltersIndicator() {
+    if (!filtersBtn) return;
+    const active = hasActiveAdvancedFilters();
+    filtersBtn.classList.toggle('active', active);
+    filtersBtn.title = active ? 'Filters (active)' : 'Filters';
+    filtersBtn.setAttribute('aria-label', filtersBtn.title);
   }
+  updateFiltersIndicator();
 
   let filtersMenuEl = null;
   let filtersMenuOpen = false;
@@ -4344,12 +4351,9 @@ async function renderRecordings(options = {}) {
       };
 
       state.recordingsFilter = next;
-      setStoredRecordingsFilter(next);
       state.offset = 0;
 
-      if (filtersBtn) {
-        filtersBtn.classList.toggle('active', hasActiveAdvancedFilters());
-      }
+      updateFiltersIndicator();
 
       destroyFiltersMenu();
       await load();
@@ -4376,11 +4380,8 @@ async function renderRecordings(options = {}) {
       clearBtn.onclick = async (ev) => {
         ev.preventDefault();
         state.recordingsFilter = createDefaultRecordingsFilter();
-        setStoredRecordingsFilter(state.recordingsFilter);
         state.offset = 0;
-        if (filtersBtn) {
-          filtersBtn.classList.toggle('active', hasActiveAdvancedFilters());
-        }
+        updateFiltersIndicator();
         destroyFiltersMenu();
         await load();
       };
@@ -4467,7 +4468,7 @@ async function renderRecordings(options = {}) {
         showToast(err.message || String(err));
       } finally {
         genMissingBtn.disabled = false;
-        genMissingBtn.textContent = 'Generate animated previews';
+        genMissingBtn.textContent = 'Generate previews';
       }
     };
   }
@@ -4540,7 +4541,7 @@ async function renderRecordings(options = {}) {
       } catch (err) {
         showToast(err.message || String(err));
         autoTagUntaggedBtn.disabled = false;
-        autoTagUntaggedBtn.textContent = 'Auto-tag untagged';
+        autoTagUntaggedBtn.textContent = 'AI tags';
       }
     };
   }
@@ -4745,7 +4746,7 @@ async function renderRecordings(options = {}) {
         recordings(limit:$limit, offset:$offset, search:$search, nameContains:$nameContains, negateNameContains:$negateNameContains, nameContainsRegex:$nameContainsRegex, streamerName:$streamerName, siteName:$siteName, tagName:$tagName, missingLivePreview:$missingLivePreview, minSizeBytes:$minSizeBytes, maxSizeBytes:$maxSizeBytes, minDurationSeconds:$minDurationSeconds, maxDurationSeconds:$maxDurationSeconds, minShortSide:$minShortSide, maxShortSide:$maxShortSide, videoCodecs:$videoCodecs, recordingIds:$recordingIds, orderBy:$orderBy, orderDir:$orderDir) {
           total
           totalSizeBytes
-          items { id title fileName relPath recordedAt durationSeconds width height sizeBytes videoCodec audioCodec thumbnailUrl livePreviewUrl contactSheetUrl streamer { name site { name } } site { name } tags { name } }
+          items { id title fileName relPath recordedAt durationSeconds width height sizeBytes videoCodec audioCodec thumbnailUrl livePreviewUrl contactSheetUrl semanticIndexed streamer { name site { name } } site { name } tags { name } }
         }
       }
     `, vars);
@@ -4872,6 +4873,9 @@ async function renderRecordings(options = {}) {
               <button class="icon-btn" data-open-video="${r.id}" title="Open video in default player">▶️</button>
               ${r.contactSheetUrl ? `<button class="icon-btn" data-open-contact-sheet="${r.id}" data-contact-sheet-url="${escapeHtml(r.contactSheetUrl)}" data-contact-sheet-title="${escapeHtml(r.title || r.fileName || 'Contact sheet')}" title="Show contact sheet">🖼️</button>` : ''}
               <button class="icon-btn" data-open-tags="${r.id}" title="Assign tags">🏷️</button>
+              <button type="button" class="icon-btn" data-find-similar="${r.id}" data-source-title="${escapeHtml(r.title || r.fileName)}" title="${r.semanticIndexed ? 'Find similar videos' : 'Video is not semantically indexed'}" aria-label="Find similar videos" ${r.semanticIndexed ? '' : 'disabled'}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3ZM20 2v4m-2-2h4" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></svg>
+              </button>
             </div>
           </div>
         </div>
@@ -4970,6 +4974,28 @@ async function renderRecordings(options = {}) {
         e.stopPropagation();
         e.preventDefault();
         openContactSheetModal(btn.dataset.contactSheetTitle, btn.dataset.contactSheetUrl);
+      });
+    });
+
+    gridEl.querySelectorAll('button[data-find-similar]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (btn.disabled) return;
+        if (!isSemanticSearchView) {
+          pendingSimilarSearch = {
+            recordingId: Number(btn.dataset.findSimilar),
+            title: btn.dataset.sourceTitle,
+          };
+          location.hash = '#recordings';
+          return;
+        }
+        btn.disabled = true;
+        try {
+          await runSemanticSearch(Number(btn.dataset.findSimilar), btn.dataset.sourceTitle);
+        } finally {
+          btn.disabled = false;
+        }
       });
     });
 
@@ -5203,6 +5229,9 @@ async function renderRecordings(options = {}) {
   };
 
   await load().catch(e => showToast(e.message));
+  if (options.similarSource) {
+    await runSemanticSearch(options.similarSource.recordingId, options.similarSource.title);
+  }
 }
 
 async function openRecording(id) {
@@ -6962,6 +6991,15 @@ async function renderAndRestore() {
   await restoreActiveJobsOnce();
   await render();
 }
+
+document.querySelector('.nav [data-route="recordings"]').addEventListener('click', (event) => {
+  state.semanticSearch = { query: '', recordingIds: null };
+  state.offset = 0;
+  if (location.hash === '#recordings' || !location.hash) {
+    event.preventDefault();
+    renderAndRestore().catch(e => showToast(e.message));
+  }
+});
 
 window.addEventListener('hashchange', () => {
   renderAndRestore().catch(() => { /* ignore */ });

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
 from dataclasses import dataclass
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,7 +20,7 @@ from sqlalchemy import select
 from .catalog_paths import resolve_recording_path
 from .media import check_ffmpeg_installed, find_contact_sheet_path, quick_file_hash
 from .models import Recording
-from .settings import DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY, _default_ai_models_dir
+from .settings import DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY, _default_ai_models_dir, resolve_ai_models_dir
 
 MODEL_FILENAME = "embeddinggemma-2-text-vision-440m.litertlm"
 MODEL_SHA256 = "92dcbea108899e5d6e30d919b0744f90d9967e80c67a4ab5503ac16d54f62eb0"
@@ -26,11 +29,6 @@ MODEL_CANDIDATE_URLS = (
     "https://huggingface.co/litert-community/embeddinggemma-2-text-vision-440m-litert-lm/resolve/main/embeddinggemma-2-text-vision-440m.litertlm",
 )
 _MODEL_DOWNLOAD_LOCK = threading.Lock()
-
-# LiteRT emits verbose native INFO diagnostics for normal image preprocessing.
-# Keep warnings and errors visible while suppressing that routine telemetry.
-os.environ.setdefault("GLOG_minloglevel", "1")
-
 
 @dataclass(frozen=True)
 class SemanticIndexResult:
@@ -45,9 +43,7 @@ def default_ai_models_dir() -> Path:
 
 
 def resolve_models_dir(value: str | Path | None = None) -> Path:
-    if value is None:
-        return default_ai_models_dir()
-    return Path(value).expanduser().resolve() if str(value).strip() else default_ai_models_dir()
+    return resolve_ai_models_dir(value)
 
 
 def _file_sha256(path: Path) -> str:
@@ -224,9 +220,19 @@ def ensure_contact_sheet_for_video(video_path: Path, *, catalog_root: str | Path
 def _semantic_search_searcher(model_path: Path, database_path: Path):
     try:
         from mediapipe.tasks.python import BaseOptions
+        from mediapipe.tasks.python.core import mediapipe_c_bindings, mediapipe_c_utils
         from mediapipe.tasks.python.retrieval import semantic_retriever, universal_embedder
     except ImportError as exc:  # pragma: no cover - better surfaced to caller
         raise RuntimeError("Semantic search requires mediapipe to be installed.") from exc
+
+    # GLOG_minloglevel does not control LiteRT LM's Abseil logging.
+    # Its C API uses ERROR=4, and must be called before creating the engine.
+    native_library = mediapipe_c_bindings.load_raw_library((
+        mediapipe_c_utils.CFunction(
+            "litert_lm_set_min_log_level", [ctypes.c_int], None
+        ),
+    ))
+    native_library.litert_lm_set_min_log_level(4)
 
     embedder_options = universal_embedder.UniversalEmbedderOptions(
         base_options=BaseOptions(model_asset_path=str(model_path)),
@@ -424,3 +430,76 @@ def search_semantic_recordings(
             return matches
     except Exception as exc:
         raise RuntimeError(f"Semantic search failed: {exc}") from exc
+
+
+def semantic_recording_is_indexed(catalog_root: str | Path, recording_id: int) -> bool:
+    database_path = _semantic_db_path(catalog_root)
+    if not database_path.is_file():
+        return False
+    with closing(sqlite3.connect(database_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        return connection.execute(
+            "SELECT 1 FROM rag_vector_store WHERE record_id = ? AND embeddings IS NOT NULL LIMIT 1",
+            (f"recording_{recording_id}",),
+        ).fetchone() is not None
+
+
+def search_similar_recordings(
+    *,
+    catalog_root: str | Path,
+    recording_id: int,
+    settings: Any | None,
+    limit: int = 10,
+    min_similarity: float | None = None,
+) -> list[dict[str, Any]]:
+    import numpy as np
+
+    database_path = _semantic_db_path(catalog_root)
+    if not database_path.is_file():
+        raise RuntimeError("Semantic index is not available yet. Run a catalog scan first.")
+    threshold = float(
+        min_similarity if min_similarity is not None
+        else getattr(settings, "semantic_search_min_similarity", DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY)
+    )
+    threshold = max(0.0, min(1.0, threshold))
+
+    def decode_embedding(blob: bytes):
+        # MediaPipe's vector store serializes float32 vectors with a VF32 header.
+        if not isinstance(blob, bytes) or blob[:4] != b"VF32" or len(blob) != 4 + 768 * 4:
+            raise RuntimeError("Unsupported semantic embedding format. Rebuild the semantic index.")
+        vector = np.frombuffer(blob, dtype="<f4", offset=4)
+        norm = float(np.linalg.norm(vector))
+        if not np.isfinite(vector).all() or not np.isfinite(norm) or norm <= 0:
+            raise RuntimeError("Invalid semantic embedding. Rebuild the semantic index.")
+        return vector / norm
+
+    try:
+        with closing(sqlite3.connect(database_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+            source_id = f"recording_{recording_id}"
+            source = connection.execute(
+                "SELECT embeddings FROM rag_vector_store WHERE record_id = ?", (source_id,)
+            ).fetchone()
+            if source is None:
+                raise RuntimeError("This video is not semantically indexed. Run a catalog scan first.")
+            source_vector = decode_embedding(source[0])
+            matches = []
+            for record_id, blob, metadata_json in connection.execute(
+                "SELECT record_id, embeddings, metadata FROM rag_vector_store WHERE record_id != ?",
+                (source_id,),
+            ):
+                if not record_id.startswith("recording_"):
+                    continue
+                score = float(np.clip(np.dot(source_vector, decode_embedding(blob)), -1.0, 1.0))
+                if score < threshold:
+                    continue
+                metadata = json.loads(metadata_json or "{}")
+                matches.append({
+                    "recording_id": int(record_id.removeprefix("recording_")),
+                    "score": score,
+                    "rel_path": str(metadata.get("rel_path") or ""),
+                    "file_name": str(metadata.get("file_name") or ""),
+                    "title": str(metadata.get("title") or ""),
+                })
+            matches.sort(key=lambda item: (-item["score"], item["recording_id"]))
+            return matches[:max(1, int(limit))]
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        raise RuntimeError(f"Similar video search failed: {exc}") from exc

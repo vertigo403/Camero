@@ -100,6 +100,7 @@
             The default pattern expects something like:
           </div>
           <div class="help-p"><span class="help-code">&lt;streamer&gt;_&lt;site&gt;_&lt;YYYYMMDD&gt;_&lt;time&gt;.&lt;ext&gt;</span></div>
+          <div class="help-p">It also accepts <span class="help-code">&lt;streamer&gt;_&lt;YYYY-MM-DD&gt;_&lt;HH-mm-ss&gt;_&lt;suffix&gt;.&lt;ext&gt;</span> without a site. Streamer names may contain underscores in either format.</div>
           <div class="help-p">
             If your naming scheme is different, adjust the filename regex in <b>Settings</b>. Camero accepts named groups such as
             <span class="help-code">streamer</span>, <span class="help-code">site</span>, <span class="help-code">date</span>, <span class="help-code">time</span>.
@@ -138,6 +139,25 @@
         </div>
 
         <div class="list-item">
+          <div class="help-section-title">AI Magic Search (semantic search)</div>
+          <div class="help-p">
+            Find recordings by describing their visual content in natural language instead of matching exact filenames or tags.
+            Camero compares your description with an AI index of each video's visual representation (a collection of sampled frames).
+          </div>
+          <ul class="help-list">
+            <li><b>Prepare the index:</b> run <b>Scan catalog</b> and wait for semantic indexing to finish. Camero creates missing visual representation and downloads the AI model automatically when needed; the initial download requires an internet connection. Later scans update changed recordings.</li>
+            <li><b>Search:</b> in <b>Recordings</b>, click <b>AI Magic Search</b>, enter a description such as <span class="help-code">a blonde girl in the shower</span>, and press <span class="help-kbd">Enter</span> or click <b>OK</b>.</li>
+            <li><b>Find similar recordings:</b> click the <b>Find similar videos</b> sparkles icon on a recording card to find visually similar videos using its stored AI embeddings; the button is enabled only for semantically indexed recordings, and results exclude the source video.</li>
+            <li><b>Results:</b> the search uses the completed local index and returns up to 100 matching videos. It does not download models or index videos while you search. AI tags are not required.</li>
+            <li><b>Adjust matching:</b> open <b>Settings &gt; AI</b> to choose the <b>AI models directory</b> and <b>Minimum similarity (0 to 1)</b>. A higher threshold is stricter; a lower threshold allows more matches.</li>
+          </ul>
+          <div class="help-p">
+            If no recordings match, try a simpler description or lower the similarity threshold. If the index is not available yet, run a catalog scan first.
+            Search runs locally; sampled frames may miss brief scenes, and matches are approximate rather than guaranteed.
+          </div>
+        </div>
+
+        <div class="list-item">
           <div class="help-section-title">Recording details (player modal)</div>
           <ul class="help-list">
             <li><b>Playback</b> happens inside the browser using an embedded player.</li>
@@ -160,8 +180,12 @@
             Camero builds previews from multiple 1-second fragments sampled across the video.
           </div>
           <div class="help-p">
-            If your catalog is large, generating previews can be time-consuming. You can create them per-recording, run <b>Generate animated previews</b> from the Recordings toolbar,
+            If your catalog is large, generating previews can be time-consuming. You can create them per-recording, run <b>Generate previews</b> from the Recordings toolbar,
             and optionally enable <b>Generate animated previews after scan</b> in Settings.
+            The <b>AI tags</b> button tags recordings that do not yet have tags. Use <b>AI Magic Search</b> to search by description; click <b>Recordings</b> in the navigation to return to the normal list.
+            Open <b>Settings &gt; AI &gt; Auto-tagging</b> to enable automatic tagging after scans and configure minimum confidence, scene change threshold, and frame interval.
+            The <b>AI models directory</b> is shared by auto-tagging and AI Magic Search. Put <span class="help-code">model.onnx</span> and <span class="help-code">selected_tags.csv</span> in that directory for auto-tagging. <b>Minimum similarity</b> in the <b>AI Magic Search</b> panel only affects semantic search.
+            Active filters show a red dot on the filter button. Filters reset when switching views and are not saved between application runs.
           </div>
           <div class="help-p">
             You can configure how many fragments are used (5/10/15/20, default 10) in Settings.

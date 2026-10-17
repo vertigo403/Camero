@@ -8,6 +8,7 @@ import base64
 import binascii
 import hmac
 import hashlib
+from html import escape
 import os
 import sys
 import concurrent.futures
@@ -235,7 +236,11 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return (web_dir / "index.html").read_text(encoding="utf-8")
+        from .main import CAMERO_VERSION
+
+        return (web_dir / "index.html").read_text(encoding="utf-8").replace(
+            "{{CAMERO_VERSION}}", escape(CAMERO_VERSION)
+        )
 
     @app.get("/site-logo/{site_name}.svg")
     def site_logo(site_name: str):

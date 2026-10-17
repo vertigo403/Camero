@@ -125,6 +125,8 @@ def resolve_first_resource_path(*resource_paths):
 
 def resolve_model_path(model_path):
     """Prioriza el modelo empaquetado y luego alternativas externas."""
+    if model_path and Path(model_path).is_absolute():
+        return resolve_first_resource_path(model_path)
     candidate_paths = []
     if model_path:
         candidate_paths.append(model_path)
