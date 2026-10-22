@@ -244,18 +244,6 @@ def start_scan_job(settings: AppSettings) -> ScanJob:
                     )
                 )
 
-            try:
-                index_semantic_recordings(
-                    session=session,
-                    catalog_root=settings.catalog_root or "",
-                    settings=settings,
-                    progress_cb=_semantic_index_progress,
-                    cancel_cb=_scan_cancelled,
-                )
-            except RuntimeError as exc:
-                logger.warning("Semantic indexing skipped job=%s error=%s", job_id, exc)
-                _semantic_index_progress(0, 0, 0, 1, None)
-
             # Optional: generate animated previews as a second phase.
             def _previews_cancelled() -> bool:
                 with _LOCK:
@@ -453,6 +441,18 @@ def start_scan_job(settings: AppSettings) -> ScanJob:
 
             # Final commit (normally a no-op if the scan already committed).
             session.commit()
+
+            try:
+                index_semantic_recordings(
+                    session=session,
+                    catalog_root=settings.catalog_root or "",
+                    settings=settings,
+                    progress_cb=_semantic_index_progress,
+                    cancel_cb=_scan_cancelled,
+                )
+            except RuntimeError as exc:
+                logger.warning("Semantic indexing skipped job=%s error=%s", job_id, exc)
+                _semantic_index_progress(0, 0, 0, 1, None)
 
             # Optional: auto-tag recordings that have no tags after scan.
             _active_autotag = _check_existing_active_autotag()

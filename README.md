@@ -11,6 +11,8 @@ Camero is a local catalog manager for recorded stream sessions.
   - recording date
 - Browse recordings (paginated cards), sites, tags and configuration
 - Search recordings semantically from the Recordings view using text descriptions
+  - Semantic indexing runs after automatic live preview generation, when enabled
+    in Settings; otherwise, it runs immediately after the catalog file scan.
 - Find similar videos with the search icon on recording cards in Recordings,
   streamer, site and tag views. Searches cover the entire catalog and open in
   Recordings. The icon is enabled only
@@ -36,6 +38,34 @@ Camero starts an embedded HTTP server and opens:
 
 You can change the backend host/IP and port from the Settings screen. For example,
 use `0.0.0.0` to listen on all interfaces or set a specific external/local IP.
+
+## Build executables
+
+PyInstaller builds for the operating system and architecture where it runs;
+it does not cross-compile. Use `build.bat` on Windows to generate
+`dist/Camero.exe`. On Linux (or inside WSL), run these commands from the
+repository directory:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+bash build_linux.sh
+```
+
+Install your distribution's Python venv/pip packages first if needed. Do not
+reuse a Windows virtual environment in Linux; create a Linux environment in
+a separate checkout when building on both systems.
+
+The Linux script uses `.venv/bin/python` when available, otherwise `python3`,
+and installs PyInstaller if it is missing. It generates the single-file
+executable `dist_linux/Camero`, with intermediate files in `build/linux`, without
+deleting existing Windows build outputs. Launch it with `./dist_linux/Camero`.
+Python is not required on the destination machine.
+
+Build on the oldest Linux distribution you intend to support: the executable
+still depends on compatible system libraries (including glibc), and a build
+from a newer distribution may not run on an older one. FFmpeg and the AI
+models remain external resources as described below.
 
 ## External files
 
@@ -89,4 +119,3 @@ Embeddings model is downloaded to that directory during catalog scanning. Search
 only retrieves from the completed local index, so it never waits for video
 indexing or model downloads. Later scans only reindex recordings whose media
 fingerprint or indexed metadata changed.
-
