@@ -10,8 +10,10 @@ import sys
 import threading
 import time
 import urllib.request
-from dataclasses import dataclass
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,10 +27,20 @@ from .settings import DEFAULT_SEMANTIC_SEARCH_MIN_SIMILARITY, _default_ai_models
 MODEL_FILENAME = "embeddinggemma-2-text-vision-440m.litertlm"
 MODEL_SHA256 = "92dcbea108899e5d6e30d919b0744f90d9967e80c67a4ab5503ac16d54f62eb0"
 SEMANTIC_INDEX_FORMAT_VERSION = 3
+DEFAULT_VISION_TOKENS_PER_IMAGE = 70
+EMBEDDING_DIMENSION = 768
+MANIFEST_FLUSH_INTERVAL = 16
 MODEL_CANDIDATE_URLS = (
     "https://huggingface.co/litert-community/embeddinggemma-2-text-vision-440m-litert-lm/resolve/main/embeddinggemma-2-text-vision-440m.litertlm",
 )
 _MODEL_DOWNLOAD_LOCK = threading.Lock()
+_FFMPEG_CACHE_LOCK = threading.Lock()
+_CACHED_FFMPEG_PATH: str | None = None
+_QUERY_EMBEDDER_LOCK = threading.RLock()
+_CACHED_QUERY_EMBEDDER: tuple[str, Any] | None = None
+_STORE_CACHE_LOCK = threading.RLock()
+_STORE_SNAPSHOT_CACHE: tuple[tuple[str, int, int, bytes], dict[str, Any]] | None = None
+
 
 @dataclass(frozen=True)
 class SemanticIndexResult:
@@ -52,6 +64,19 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _get_cached_ffmpeg_path() -> str | None:
+    global _CACHED_FFMPEG_PATH
+    with _FFMPEG_CACHE_LOCK:
+        if _CACHED_FFMPEG_PATH and os.path.isfile(_CACHED_FFMPEG_PATH):
+            return _CACHED_FFMPEG_PATH
+        try:
+            _, ffmpeg_path = check_ffmpeg_installed()
+            _CACHED_FFMPEG_PATH = ffmpeg_path
+            return ffmpeg_path
+        except Exception:
+            return None
 
 
 def ensure_embeddinggemma_model(models_dir: str | Path | None = None) -> Path:
@@ -171,7 +196,14 @@ def _contact_sheet_path_for_recording(catalog_root: str | Path, recording_id: in
     return root / ".camero" / "semantic_contact_sheets" / f"{recording_id}_{(file_hash or 'unknown')[:20]}.jpg"
 
 
-def ensure_contact_sheet_for_video(video_path: Path, *, catalog_root: str | Path | None = None, recording_id: int | None = None) -> Path | None:
+def ensure_contact_sheet_for_video(
+    video_path: Path,
+    *,
+    catalog_root: str | Path | None = None,
+    recording_id: int | None = None,
+    file_hash: str | None = None,
+    ffmpeg_path: str | None = None,
+) -> Path | None:
     contact_path = find_contact_sheet_path(video_path)
     if contact_path is not None:
         return contact_path
@@ -179,51 +211,78 @@ def ensure_contact_sheet_for_video(video_path: Path, *, catalog_root: str | Path
     if catalog_root is None:
         return None
 
-    file_hash = quick_file_hash(video_path)
-    out_path = _contact_sheet_path_for_recording(catalog_root, recording_id or 0, file_hash)
-    if out_path.exists() and out_path.is_file() and out_path.stat().st_size > 0:
-        return out_path
-
+    resolved_hash = (file_hash or "").strip() or quick_file_hash(video_path)
+    out_path = _contact_sheet_path_for_recording(catalog_root, recording_id or 0, resolved_hash)
     try:
-        _, ffmpeg_path = check_ffmpeg_installed()
-    except Exception:
+        if out_path.exists() and out_path.is_file() and out_path.stat().st_size > 0:
+            return out_path
+    except OSError:
+        pass
+
+    resolved_ffmpeg = ffmpeg_path or _get_cached_ffmpeg_path()
+    if not resolved_ffmpeg:
         return None
 
+    tmp_path = out_path.with_name(f"{out_path.stem}.{threading.get_ident()}.tmp{out_path.suffix}")
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            ffmpeg_path,
+        # Passing -skip_frame nokey before -i tells the demuxer/decoder to skip all
+        # P/B frames at the bitstream level instead of decoding the entire video.
+        fast_cmd = [
+            resolved_ffmpeg,
             "-y",
             "-hide_banner",
             "-loglevel",
             "error",
+            "-skip_frame",
+            "nokey",
+            "-threads",
+            "2",
             "-i",
             str(video_path),
             "-vf",
-            "select='eq(pict_type\\,I)',scale='min(320,iw)':-1,tile=6x5",
+            "scale='min(320,iw)':-1,tile=6x5",
             "-vsync",
             "0",
             "-frames:v",
             "1",
-            str(out_path),
+            str(tmp_path),
         ]
-        completed = subprocess.run(cmd, check=False, capture_output=True, text=True)
-        if completed.returncode != 0:
-            return None
-        if out_path.exists() and out_path.stat().st_size > 0:
+        completed = subprocess.run(fast_cmd, check=False, capture_output=True, text=False)
+        if completed.returncode != 0 or not tmp_path.exists() or tmp_path.stat().st_size == 0:
+            fallback_cmd = [
+                resolved_ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(video_path),
+                "-vf",
+                "select='eq(pict_type\\,I)',scale='min(320,iw)':-1,tile=6x5",
+                "-vsync",
+                "0",
+                "-frames:v",
+                "1",
+                str(tmp_path),
+            ]
+            completed = subprocess.run(fallback_cmd, check=False, capture_output=True, text=False)
+        if completed.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0:
+            tmp_path.replace(out_path)
             return out_path
     except OSError:
         return None
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return None
 
 
-def _semantic_search_searcher(model_path: Path, database_path: Path):
-    try:
-        from mediapipe.tasks.python import BaseOptions
-        from mediapipe.tasks.python.core import mediapipe_c_bindings, mediapipe_c_utils
-        from mediapipe.tasks.python.retrieval import semantic_retriever, universal_embedder
-    except ImportError as exc:  # pragma: no cover - better surfaced to caller
-        raise RuntimeError("Semantic search requires mediapipe to be installed.") from exc
+def _suppress_litert_logging() -> None:
+    from mediapipe.tasks.python.core import mediapipe_c_bindings, mediapipe_c_utils
 
     # GLOG_minloglevel does not control LiteRT LM's Abseil logging.
     # Its C API uses ERROR=4, and must be called before creating the engine.
@@ -234,18 +293,91 @@ def _semantic_search_searcher(model_path: Path, database_path: Path):
     ))
     native_library.litert_lm_set_min_log_level(4)
 
-    embedder_options = universal_embedder.UniversalEmbedderOptions(
-        base_options=BaseOptions(model_asset_path=str(model_path)),
-        l2_normalize=True,
-    )
-    embedder = universal_embedder.UniversalEmbedder.create_from_options(embedder_options)
+
+def _create_universal_embedder(model_path: Path, *, vision_tokens_per_image: int = DEFAULT_VISION_TOKENS_PER_IMAGE):
+    try:
+        from mediapipe.tasks.python import BaseOptions
+        from mediapipe.tasks.python.retrieval import universal_embedder
+    except ImportError as exc:  # pragma: no cover - better surfaced to caller
+        raise RuntimeError("Semantic search requires mediapipe to be installed.") from exc
+
+    _suppress_litert_logging()
+    device_pref = os.environ.get("CAMERO_SEMANTIC_DEVICE", "cpu").strip().lower()
+
+    def build(delegate):
+        options = universal_embedder.UniversalEmbedderOptions(
+            base_options=BaseOptions(model_asset_path=str(model_path), delegate=delegate),
+            l2_normalize=True,
+            vision_tokens_per_image=vision_tokens_per_image,
+        )
+        return universal_embedder.UniversalEmbedder.create_from_options(options)
+
+    if device_pref in {"gpu", "auto"}:
+        try:
+            return build(BaseOptions.Delegate.GPU)
+        except Exception:
+            if device_pref == "gpu":
+                raise
+    return build(BaseOptions.Delegate.CPU)
+
+
+def _semantic_search_searcher(model_path: Path, database_path: Path):
+    try:
+        from mediapipe.tasks.python.retrieval import semantic_retriever
+    except ImportError as exc:  # pragma: no cover - better surfaced to caller
+        raise RuntimeError("Semantic search requires mediapipe to be installed.") from exc
+
+    embedder = _create_universal_embedder(model_path)
     retriever_options = semantic_retriever.SemanticRetrieverOptions(
         embedder=embedder,
-        embedding_dimension=768,
+        embedding_dimension=EMBEDDING_DIMENSION,
         database_path=str(database_path),
     )
     retriever = semantic_retriever.SemanticRetriever.create_from_options(retriever_options)
     return embedder, retriever
+
+
+def _ensure_vector_store_schema(database_path: Path) -> None:
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS rag_vector_store ("
+            "ROWID INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, "
+            "text TEXT, "
+            "embeddings REAL, "
+            "record_id TEXT, "
+            "content_type TEXT, "
+            "parent_id TEXT, "
+            "child_ids TEXT, "
+            "metadata TEXT)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rag_vector_store_record_id "
+            "ON rag_vector_store(record_id)"
+        )
+        connection.commit()
+
+
+def _optimal_embedder_workers(pending_count: int) -> int:
+    env_workers = os.environ.get("CAMERO_SEMANTIC_WORKERS", "").strip()
+    if env_workers:
+        try:
+            return max(1, min(4, int(env_workers)))
+        except ValueError:
+            pass
+    if pending_count < 6:
+        return 1
+    cpu_cores = os.cpu_count() or 4
+    if cpu_cores < 6:
+        return 1
+    try:
+        import psutil
+
+        avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+        if avail_gb < 3.5:
+            return 1
+    except Exception:
+        pass
+    return 2
 
 
 def _recording_metadata(rec: Recording, rel_path: str) -> dict[str, str]:
@@ -279,6 +411,19 @@ def _recording_index_signature(rec: Recording, rel_path: str) -> str:
     }
     payload = json.dumps(source, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _serialize_vf32_embedding(embedding) -> bytes:
+    import numpy as np
+
+    vector = np.asarray(embedding, dtype="<f4").reshape(-1)
+    if vector.shape != (EMBEDDING_DIMENSION,) or not np.isfinite(vector).all():
+        raise RuntimeError("Embedder returned an invalid vector.")
+    norm = float(np.linalg.norm(vector))
+    if not np.isfinite(norm) or norm <= 0:
+        raise RuntimeError("Embedder returned a zero-norm vector.")
+    normalized = (vector / norm).astype("<f4", copy=False)
+    return b"VF32" + normalized.tobytes()
 
 
 def index_semantic_recordings(
@@ -320,64 +465,271 @@ def index_semantic_recordings(
     )
 
     try:
-        embedder, retriever = _semantic_search_searcher(model_path, database_path)
-        with embedder, retriever:
-            indexed_ids = set(retriever.get_all_record_ids())
-            for image_id in removed_ids:
-                if image_id in indexed_ids:
-                    retriever.delete_record(image_id)
-                manifest.pop(image_id, None)
+        _ensure_vector_store_schema(database_path)
+        with closing(sqlite3.connect(database_path)) as connection:
+            connection.execute("PRAGMA synchronous = NORMAL")
+            connection.execute("PRAGMA temp_store = MEMORY")
+            indexed_ids = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT record_id FROM rag_vector_store WHERE record_id IS NOT NULL"
+                )
+            }
+            if removed_ids:
+                to_remove = [(image_id,) for image_id in removed_ids if image_id in indexed_ids]
+                if to_remove:
+                    connection.executemany(
+                        "DELETE FROM rag_vector_store WHERE record_id = ?",
+                        to_remove,
+                    )
+                    connection.commit()
+                for image_id in removed_ids:
+                    indexed_ids.discard(image_id)
+                    manifest.pop(image_id, None)
+                _save_index_manifest(database_path, manifest)
+
+            if not pending:
+                return SemanticIndexResult(total=len(all_items), indexed=0, skipped=len(all_items), failed=0)
+
+            ffmpeg_path = _get_cached_ffmpeg_path()
+            num_embedders = _optimal_embedder_workers(len(pending))
+            prep_workers = max(2, min(6, (os.cpu_count() or 4) // 2))
+            embedders = [_create_universal_embedder(model_path) for _ in range(num_embedders)]
+
+            def prepare_task(item_tuple: tuple[int, str, str | None, str, str, dict[str, str], Path | None]):
+                rec_id, rel_path, rec_hash, image_id, signature, metadata, resolved = item_tuple
+                if resolved is None or not resolved.exists() or not resolved.is_file():
+                    return (rel_path, image_id, signature, metadata, None, None)
+                image_path = ensure_contact_sheet_for_video(
+                    resolved,
+                    catalog_root=root,
+                    recording_id=rec_id,
+                    file_hash=rec_hash,
+                    ffmpeg_path=ffmpeg_path,
+                )
+                if image_path is None:
+                    return (rel_path, image_id, signature, metadata, None, None)
+                try:
+                    image_bytes = image_path.read_bytes()
+                except OSError:
+                    return (rel_path, image_id, signature, metadata, None, None)
+                return (rel_path, image_id, signature, metadata, str(image_path), image_bytes)
+
+            def embed_task(worker_idx: int, prepared_item):
+                rel_path, image_id, signature, metadata, image_path_str, image_bytes = prepared_item
+                if image_bytes is None or image_path_str is None:
+                    return (rel_path, image_id, signature, metadata, None, None)
+                result = embedders[worker_idx].embed_image(image_bytes)
+                embeddings = getattr(result, "embeddings", None) or []
+                if not embeddings:
+                    raise RuntimeError("No embedding returned for image.")
+                blob = _serialize_vf32_embedding(embeddings[0].embedding)
+                return (rel_path, image_id, signature, metadata, image_path_str, blob)
 
             indexed = 0
             skipped = len(all_items) - len(pending)
             failed = 0
             total = len(all_items)
-            for position, (rec, rel_path, image_id, signature) in enumerate(pending, start=1):
-                if cancel_cb is not None and cancel_cb():
-                    break
-                resolved = resolve_recording_path(settings, rel_path) if settings is not None else None
-                if resolved is None or not resolved.exists() or not resolved.is_file():
-                    failed += 1
-                    if progress_cb is not None:
-                        progress_cb(len(pending), position, indexed, failed, rel_path)
-                    continue
-                image_path = ensure_contact_sheet_for_video(
-                    resolved,
-                    catalog_root=root,
-                    recording_id=int(getattr(rec, "id", 0) or 0),
-                )
-                if image_path is None:
-                    failed += 1
-                    if progress_cb is not None:
-                        progress_cb(len(pending), position, indexed, failed, rel_path)
-                    continue
-                metadata = _recording_metadata(rec, rel_path)
-                try:
-                    if image_id not in indexed_ids:
-                        retriever.insert_image(
-                            image_id=image_id,
-                            image_path=str(image_path),
-                            metadata=metadata,
-                        )
-                        indexed_ids.add(image_id)
-                    else:
-                        retriever.delete_record(image_id)
-                        retriever.insert_image(
-                            image_id=image_id,
-                            image_path=str(image_path),
-                            metadata=metadata,
-                        )
-                    manifest[image_id] = signature
-                    indexed += 1
-                except RuntimeError:
-                    failed += 1
-                finally:
-                    if progress_cb is not None:
-                        progress_cb(len(pending), position, indexed, failed, rel_path)
-            _save_index_manifest(database_path, manifest)
+            position = 0
+            uncommitted_rows: list[tuple[str, bytes, str, str, str]] = []
+            uncommitted_deletes: list[tuple[str]] = []
+
+            def flush_pending_writes() -> None:
+                if not uncommitted_rows and not uncommitted_deletes:
+                    return
+                if uncommitted_deletes:
+                    connection.executemany(
+                        "DELETE FROM rag_vector_store WHERE record_id = ?",
+                        uncommitted_deletes,
+                    )
+                    uncommitted_deletes.clear()
+                if uncommitted_rows:
+                    connection.executemany(
+                        "INSERT INTO rag_vector_store (text, embeddings, record_id, content_type, metadata) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        uncommitted_rows,
+                    )
+                    uncommitted_rows.clear()
+                connection.commit()
+                _save_index_manifest(database_path, manifest)
+
+            try:
+                task_specs = []
+                for rec, rel_path, image_id, signature in pending:
+                    resolved = resolve_recording_path(settings, rel_path) if settings is not None else None
+                    rec_id = int(getattr(rec, "id", 0) or 0)
+                    rec_hash = str(getattr(rec, "file_hash", "") or "") or None
+                    metadata = _recording_metadata(rec, rel_path)
+                    task_specs.append((rec_id, rel_path, rec_hash, image_id, signature, metadata, resolved))
+
+                spec_iter = iter(task_specs)
+                max_prep_in_flight = prep_workers * 2
+
+                with (
+                    ThreadPoolExecutor(max_workers=prep_workers) as prep_pool,
+                    ThreadPoolExecutor(max_workers=num_embedders) as embed_pool,
+                ):
+                    prep_futures: deque[Future] = deque()
+                    embed_futures: deque[tuple[int, Future]] = deque()
+                    free_workers: deque[int] = deque(range(num_embedders))
+
+                    def refill_prep() -> None:
+                        while len(prep_futures) < max_prep_in_flight:
+                            nxt = next(spec_iter, None)
+                            if nxt is None:
+                                break
+                            prep_futures.append(prep_pool.submit(prepare_task, nxt))
+
+                    refill_prep()
+
+                    while prep_futures or embed_futures:
+                        if cancel_cb is not None and cancel_cb():
+                            for fut in prep_futures:
+                                fut.cancel()
+                            break
+
+                        while free_workers and prep_futures:
+                            prep_fut = prep_futures.popleft()
+                            refill_prep()
+                            prepared = prep_fut.result()
+                            worker_idx = free_workers.popleft()
+                            embed_futures.append(
+                                (worker_idx, embed_pool.submit(embed_task, worker_idx, prepared))
+                            )
+
+                        if not embed_futures:
+                            break
+
+                        worker_idx, embed_fut = embed_futures.popleft()
+                        free_workers.append(worker_idx)
+                        position += 1
+                        rel_path_for_cb: str | None = None
+                        try:
+                            rel_path, image_id, signature, metadata, image_path_str, blob = embed_fut.result()
+                            rel_path_for_cb = rel_path
+                            if blob is None or image_path_str is None:
+                                failed += 1
+                            else:
+                                if image_id in indexed_ids:
+                                    uncommitted_deletes.append((image_id,))
+                                uncommitted_rows.append((
+                                    image_path_str,
+                                    blob,
+                                    image_id,
+                                    "IMAGE",
+                                    json.dumps(metadata, separators=(",", ":"), ensure_ascii=False),
+                                ))
+                                indexed_ids.add(image_id)
+                                manifest[image_id] = signature
+                                indexed += 1
+                                if len(uncommitted_rows) >= MANIFEST_FLUSH_INTERVAL:
+                                    flush_pending_writes()
+                        except Exception:
+                            failed += 1
+                        finally:
+                            if progress_cb is not None:
+                                progress_cb(len(pending), position, indexed, failed, rel_path_for_cb)
+            finally:
+                flush_pending_writes()
+                for emb in embedders:
+                    try:
+                        emb.close()
+                    except Exception:
+                        pass
+
             return SemanticIndexResult(total=total, indexed=indexed, skipped=skipped, failed=failed)
     except Exception as exc:
         raise RuntimeError(f"Semantic indexing failed: {exc}") from exc
+
+
+def _decode_vf32_embedding(blob: bytes):
+    import numpy as np
+
+    # MediaPipe's vector store serializes float32 vectors with a VF32 header.
+    if not isinstance(blob, bytes) or blob[:4] != b"VF32" or len(blob) != 4 + EMBEDDING_DIMENSION * 4:
+        raise RuntimeError("Unsupported semantic embedding format. Rebuild the semantic index.")
+    vector = np.frombuffer(blob, dtype="<f4", offset=4)
+    norm = float(np.linalg.norm(vector))
+    if not np.isfinite(vector).all() or not np.isfinite(norm) or norm <= 0:
+        raise RuntimeError("Invalid semantic embedding. Rebuild the semantic index.")
+    return (vector / norm).astype(np.float32, copy=False)
+
+
+def _sqlite_signature(database_path: Path) -> tuple[str, int, int, bytes]:
+    resolved = str(database_path.resolve())
+    st = database_path.stat()
+    header_counter = b""
+    try:
+        with database_path.open("rb") as f:
+            header = f.read(40)
+            if len(header) >= 28:
+                header_counter = header[24:28]
+    except OSError:
+        pass
+    return (resolved, st.st_mtime_ns, st.st_size, header_counter)
+
+
+def _load_vector_store_snapshot(database_path: Path) -> dict[str, Any]:
+    import numpy as np
+
+    global _STORE_SNAPSHOT_CACHE
+    with _STORE_CACHE_LOCK:
+        sig = _sqlite_signature(database_path)
+        if _STORE_SNAPSHOT_CACHE is not None and _STORE_SNAPSHOT_CACHE[0] == sig:
+            return _STORE_SNAPSHOT_CACHE[1]
+
+        record_ids: list[str] = []
+        vectors: list[Any] = []
+        metadata_list: list[dict[str, Any]] = []
+        id_to_index: dict[str, int] = {}
+
+        with closing(sqlite3.connect(database_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+            rows = connection.execute(
+                "SELECT record_id, embeddings, metadata FROM rag_vector_store WHERE record_id IS NOT NULL"
+            ).fetchall()
+
+        for record_id, blob, metadata_json in rows:
+            record_id_str = str(record_id)
+            if blob is None:
+                continue
+            vec = _decode_vf32_embedding(blob)
+            try:
+                meta = json.loads(metadata_json or "{}")
+                if not isinstance(meta, dict):
+                    meta = {}
+            except (ValueError, TypeError):
+                meta = {}
+            idx = len(record_ids)
+            record_ids.append(record_id_str)
+            vectors.append(vec)
+            metadata_list.append(meta)
+            id_to_index[record_id_str] = idx
+
+        matrix = np.stack(vectors) if vectors else np.empty((0, EMBEDDING_DIMENSION), dtype=np.float32)
+        snapshot = {
+            "record_ids": record_ids,
+            "vectors": matrix,
+            "metadata": metadata_list,
+            "id_to_index": id_to_index,
+        }
+        _STORE_SNAPSHOT_CACHE = (sig, snapshot)
+        return snapshot
+
+
+def _get_query_embedder(model_path: Path):
+    global _CACHED_QUERY_EMBEDDER
+    key = str(model_path.resolve())
+    with _QUERY_EMBEDDER_LOCK:
+        if _CACHED_QUERY_EMBEDDER is None or _CACHED_QUERY_EMBEDDER[0] != key:
+            if _CACHED_QUERY_EMBEDDER is not None:
+                try:
+                    _CACHED_QUERY_EMBEDDER[1].close()
+                except Exception:
+                    pass
+                _CACHED_QUERY_EMBEDDER = None
+            embedder = _create_universal_embedder(model_path)
+            _CACHED_QUERY_EMBEDDER = (key, embedder)
+        return _CACHED_QUERY_EMBEDDER[1]
 
 
 def search_semantic_recordings(
@@ -388,6 +740,8 @@ def search_semantic_recordings(
     limit: int = 10,
     min_similarity: float | None = None,
 ) -> list[dict[str, Any]]:
+    import numpy as np
+
     text = (query or "").strip()
     if not text:
         return []
@@ -405,29 +759,50 @@ def search_semantic_recordings(
         raise RuntimeError("EmbeddingGemma model is not available yet. Run a catalog scan first.")
 
     try:
-        embedder, retriever = _semantic_search_searcher(model_path, database_path)
-        with embedder, retriever:
-            limit_i = max(1, int(limit))
-            result = retriever.retrieve(query=text, limit=limit_i, min_similarity=threshold)
-            matches: list[dict[str, Any]] = []
-            for record in (getattr(result, "records", []) or []):
-                metadata = getattr(record, "metadata", {}) or {}
-                rec_id = int(metadata.get("recording_id") or str(getattr(record, "id", "")).replace("recording_", "") or 0)
-                if not rec_id:
-                    continue
-                score = float(getattr(record, "score", 0.0) or 0.0)
-                if score < threshold:
-                    continue
-                matches.append(
-                    {
-                        "recording_id": rec_id,
-                        "score": score,
-                        "rel_path": str(metadata.get("rel_path") or ""),
-                        "file_name": str(metadata.get("file_name") or ""),
-                        "title": str(metadata.get("title") or ""),
-                    }
-                )
-            return matches
+        snapshot = _load_vector_store_snapshot(database_path)
+        matrix = snapshot["vectors"]
+        if matrix.shape[0] == 0:
+            return []
+
+        with _QUERY_EMBEDDER_LOCK:
+            embedder = _get_query_embedder(model_path)
+            result = embedder.embed_text(text)
+        embeddings = getattr(result, "embeddings", None) or []
+        if not embeddings:
+            return []
+        query_vec = np.asarray(embeddings[0].embedding, dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(query_vec))
+        if norm <= 0 or not np.isfinite(norm):
+            return []
+        query_vec = query_vec / norm
+
+        scores = np.clip(matrix @ query_vec, -1.0, 1.0)
+        limit_i = max(1, int(limit))
+        matches: list[dict[str, Any]] = []
+        for idx in np.argsort(-scores, kind="stable"):
+            score = float(scores[idx])
+            if score < threshold:
+                break
+            record_id = snapshot["record_ids"][idx]
+            metadata = snapshot["metadata"][idx]
+            try:
+                rec_id = int(metadata.get("recording_id") or record_id.replace("recording_", "") or 0)
+            except (ValueError, TypeError):
+                rec_id = 0
+            if not rec_id:
+                continue
+            matches.append(
+                {
+                    "recording_id": rec_id,
+                    "score": score,
+                    "rel_path": str(metadata.get("rel_path") or ""),
+                    "file_name": str(metadata.get("file_name") or ""),
+                    "title": str(metadata.get("title") or ""),
+                }
+            )
+            if len(matches) >= limit_i:
+                break
+        return matches
     except Exception as exc:
         raise RuntimeError(f"Semantic search failed: {exc}") from exc
 
@@ -436,11 +811,15 @@ def semantic_recording_is_indexed(catalog_root: str | Path, recording_id: int) -
     database_path = _semantic_db_path(catalog_root)
     if not database_path.is_file():
         return False
-    with closing(sqlite3.connect(database_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
-        return connection.execute(
-            "SELECT 1 FROM rag_vector_store WHERE record_id = ? AND embeddings IS NOT NULL LIMIT 1",
-            (f"recording_{recording_id}",),
-        ).fetchone() is not None
+    try:
+        snapshot = _load_vector_store_snapshot(database_path)
+        return f"recording_{recording_id}" in snapshot["id_to_index"]
+    except Exception:
+        with closing(sqlite3.connect(database_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+            return connection.execute(
+                "SELECT 1 FROM rag_vector_store WHERE record_id = ? AND embeddings IS NOT NULL LIMIT 1",
+                (f"recording_{recording_id}",),
+            ).fetchone() is not None
 
 
 def search_similar_recordings(
@@ -462,44 +841,38 @@ def search_similar_recordings(
     )
     threshold = max(0.0, min(1.0, threshold))
 
-    def decode_embedding(blob: bytes):
-        # MediaPipe's vector store serializes float32 vectors with a VF32 header.
-        if not isinstance(blob, bytes) or blob[:4] != b"VF32" or len(blob) != 4 + 768 * 4:
-            raise RuntimeError("Unsupported semantic embedding format. Rebuild the semantic index.")
-        vector = np.frombuffer(blob, dtype="<f4", offset=4)
-        norm = float(np.linalg.norm(vector))
-        if not np.isfinite(vector).all() or not np.isfinite(norm) or norm <= 0:
-            raise RuntimeError("Invalid semantic embedding. Rebuild the semantic index.")
-        return vector / norm
-
     try:
+        source_id = f"recording_{recording_id}"
         with closing(sqlite3.connect(database_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
-            source_id = f"recording_{recording_id}"
             source = connection.execute(
                 "SELECT embeddings FROM rag_vector_store WHERE record_id = ?", (source_id,)
             ).fetchone()
             if source is None:
                 raise RuntimeError("This video is not semantically indexed. Run a catalog scan first.")
-            source_vector = decode_embedding(source[0])
-            matches = []
-            for record_id, blob, metadata_json in connection.execute(
-                "SELECT record_id, embeddings, metadata FROM rag_vector_store WHERE record_id != ?",
-                (source_id,),
-            ):
-                if not record_id.startswith("recording_"):
-                    continue
-                score = float(np.clip(np.dot(source_vector, decode_embedding(blob)), -1.0, 1.0))
-                if score < threshold:
-                    continue
-                metadata = json.loads(metadata_json or "{}")
-                matches.append({
-                    "recording_id": int(record_id.removeprefix("recording_")),
-                    "score": score,
-                    "rel_path": str(metadata.get("rel_path") or ""),
-                    "file_name": str(metadata.get("file_name") or ""),
-                    "title": str(metadata.get("title") or ""),
-                })
-            matches.sort(key=lambda item: (-item["score"], item["recording_id"]))
-            return matches[:max(1, int(limit))]
+
+        snapshot = _load_vector_store_snapshot(database_path)
+        source_idx = snapshot["id_to_index"].get(source_id)
+        if source_idx is None:
+            raise RuntimeError("This video is not semantically indexed. Run a catalog scan first.")
+
+        source_vector = snapshot["vectors"][source_idx]
+        scores = np.clip(snapshot["vectors"] @ source_vector, -1.0, 1.0)
+        matches = []
+        for idx, record_id in enumerate(snapshot["record_ids"]):
+            if idx == source_idx or not record_id.startswith("recording_"):
+                continue
+            score = float(scores[idx])
+            if score < threshold:
+                continue
+            metadata = snapshot["metadata"][idx]
+            matches.append({
+                "recording_id": int(record_id.removeprefix("recording_")),
+                "score": score,
+                "rel_path": str(metadata.get("rel_path") or ""),
+                "file_name": str(metadata.get("file_name") or ""),
+                "title": str(metadata.get("title") or ""),
+            })
+        matches.sort(key=lambda item: (-item["score"], item["recording_id"]))
+        return matches[:max(1, int(limit))]
     except (sqlite3.Error, ValueError, TypeError) as exc:
         raise RuntimeError(f"Similar video search failed: {exc}") from exc
