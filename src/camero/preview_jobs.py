@@ -269,7 +269,10 @@ def _build_live_preview_cmd(
     # concat filter
     parts = []
     for i in range(n):
-        parts.append(f"[{i}:v]setpts=PTS-STARTPTS[v{i}]")
+        parts.append(
+            f"[{i}:v]scale=320:180:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            f"pad=320:180:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v{i}]"
+        )
 
     concat_inputs = "".join([f"[v{i}]" for i in range(n)])
     parts.append(f"{concat_inputs}concat=n={n}:v=1:a=0[vcat]")
